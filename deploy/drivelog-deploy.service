@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply a validated DriveLog release manifest
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/drivelog/deploy-agent.py
+WorkingDirectory=/opt/drivelog
+TimeoutStartSec=600
+UMask=0077

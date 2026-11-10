@@ -1,0 +1,12 @@
+target/
+.idea/
+.vscode/
+.env
+*.env
+!.env.example
+gha-creds-*.json
+*.key
+*.pem
+*.log
+__pycache__/
+*.pyc
