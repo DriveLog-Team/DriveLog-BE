@@ -1,0 +1,63 @@
+name: drivelog
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: drivelog
+      POSTGRES_USER: drivelog
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drivelog -d drivelog"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging: &logs
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: ["redis-data:/data"]
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging: *logs
+  backend:
+    profiles: ["application"]
+    image: ${BACKEND_IMAGE:-eclipse-temurin:21-jre-jammy}
+    restart: unless-stopped
+    environment:
+      DRIVELOG_RELEASE: ${DRIVELOG_RELEASE:-unreleased}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/drivelog
+      SPRING_DATASOURCE_USERNAME: drivelog
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_DATA_REDIS_HOST: redis
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    ports: ["127.0.0.1:8080:8080"]
+    mem_limit: 640m
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging: *logs
+  nginx:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    ports: ["80:80"]
+    volumes: ["./nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    mem_limit: 64m
+    logging: *logs
+volumes:
+  postgres-data:
+  redis-data:

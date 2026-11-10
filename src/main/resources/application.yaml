@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: drivelog-api
+server:
+  port: 8080
+  shutdown: graceful
+  forward-headers-strategy: framework
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+drivelog:
+  release: ${DRIVELOG_RELEASE:local}

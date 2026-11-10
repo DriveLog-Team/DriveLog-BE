@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a new DriveLog release
+
+[Timer]
+OnBootSec=20s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=drivelog-deploy.service
+
+[Install]
+WantedBy=timers.target
