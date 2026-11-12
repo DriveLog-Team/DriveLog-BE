@@ -8,12 +8,16 @@ import org.springframework.web.bind.annotation.RestController;
 /** Public, non-sensitive integration status. No client may grant an OEM capability. */
 @RestController
 public class IntegrationController {
+    private final boolean mediaEnabled;
+    public IntegrationController(org.springframework.core.env.Environment env) {
+        mediaEnabled=env.matchesProfiles("media");
+    }
     public record Integration(String id, String executionLocation, boolean publicReferenceAvailable,
             boolean targetExecutionVerified, boolean operational, List<String> blockers) {}
     public record Readiness(String contractVersion, String reviewedOn, String automaticHighlightStatus,
             List<Integration> integrations) {}
 
-    @GetMapping("/api/v1/integrations")
+    @GetMapping("/api/integrations")
     @io.swagger.v3.oas.annotations.Operation(operationId="getIntegrationReadiness", tags="서버 상태",
             summary="차량·외부 연동 검증 상태 조회", description="operational 및 blockers로 운영 지원 여부를 판단한다.")
     public Readiness integrations() {
@@ -30,13 +34,13 @@ public class IntegrationController {
                         List.of("META_APP_ID_AND_MOBILE_CLIENT_NOT_CONFIGURED")),
                 new Integration("kakaotalk-share", "MOBILE_OR_WEB", true, false, false,
                         List.of("KAKAO_APP_AND_HTTPS_SHARE_DOMAIN_NOT_CONFIGURED")),
-                new Integration("media-storage-and-worker", "SERVER", true, false, false,
-                        List.of("MEDIA_BUCKET_AND_WORKER_NOT_PROVISIONED", "HTTPS_AND_USER_AUTH_REQUIRED"))));
+                new Integration("registered-trip-media", "SERVER", true, false, mediaEnabled,
+                        mediaEnabled ? List.of() : List.of("MEDIA_PROFILE_DISABLED"))));
     }
 
-    @GetMapping("/api/v1/export-profiles")
+    @GetMapping("/api/export-profiles")
     @io.swagger.v3.oas.annotations.Operation(operationId="getExportProfiles", tags="서버 상태",summary="숏폼 출력 규격과 운영 가용성 조회")
     public List<ExportProfile.Description> exportProfiles() {
-        return java.util.Arrays.stream(ExportProfile.values()).map(ExportProfile::describe).toList();
+        return java.util.Arrays.stream(ExportProfile.values()).map(p -> p.describe(mediaEnabled)).toList();
     }
 }

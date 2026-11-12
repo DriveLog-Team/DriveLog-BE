@@ -1,0 +1,47 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DriveLog · 프론트 연동 명세</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#f6f8f6;color:#182e28;font:16px/1.65 system-ui,sans-serif}main{max-width:1040px;margin:auto;padding:32px 5vw 64px}header{border-bottom:3px solid #276053}h2{margin-top:2em}a{color:#075b54}nav{display:flex;flex-wrap:wrap;gap:1em}code{overflow-wrap:anywhere}pre{padding:1em;color:#f4faf7;background:#19372f;border-radius:6px;overflow:auto}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #c3cfc7;text-align:left;vertical-align:top}td:nth-child(2){overflow-wrap:anywhere}small{color:#475e54}</style>
+<main><header><small>DriveLog / 차량 회고 · 프론트엔드 인계</small><h1>대화 추천에서 휴대폰 저장까지</h1>
+<p>운영 기준 주소 <code>https://35.216.33.209</code> · <a href="/api/swagger-ui.html">운영 Swagger</a> · <a href="/api/v3/api-docs">OpenAPI JSON</a>. API 경로는 모두 <code>/api/</code>로 시작한다.</p>
+<nav><a href="#auth">연결</a><a href="#flow">호출 순서</a><a href="#list">전체 명세</a><a href="#state">오류·상태</a><a href="#scope">기획 범위</a></nav></header>
+<h2 id="auth">1. 프론트 연결</h2>
+<p>먼저 <a href="/api/status">배포 상태</a>로 연결을 확인한다. 운행 및 편집 작업은 <strong>팀 작업공간</strong>을 공유한다. FE 서버(BFF)가 팀 사용자 인증 뒤 허용된 메서드와 경로만 프록시하고, <code>Authorization: Bearer &lt;MEDIA_TOKEN&gt;</code>을 주입한다. 토큰은 공개 번들·저장소·쿼리 문자열에 넣지 않는다. 개발자 개인 시험은 HTTPS Swagger의 Authorize를 사용한다. 팀 서버의 운영자가 IAP로 VM의 <code>/opt/drivelog/media.env</code>에서 <code>MEDIA_TOKEN</code> 항목만 받아 비밀 환경변수로 설정한다. Gemini 키는 FE에서 필요 없다.</p>
+<p>Swagger는 같은 출처에서 호출한다. 별도 웹 출처에서는 브라우저가 자체 BFF를 호출한다. 팀 데모는 사전 등록된 합성 운행 <code>demo</code>로 시작한다. QR을 받은 휴대폰에는 팀 토큰이 필요 없다.</p>
+<h2 id="flow">2. 실제 호출 순서</h2>
+<ol><li><code>GET /api/trips</code>에서 ID를 선택하고 추천을 요청한다. <code>202</code>는 등록 성공이다.</li></ol>
+<pre>POST /api/media/jobs
+Content-Type: application/json
+{"tripId":"demo","profile":"STORY_15"}
+
+→ 202 {"jobId":"…"}
+GET /api/media/jobs/{jobId}</pre>
+<p>1~3초 간격으로 조회하고 화면 이탈·READY·FAILED 시 멈춘다. READY면 <code>result.cards</code>의 서버 순서를 사용한다. 각 카드의 <code>title</code>, <code>recommendation.quote</code>, <code>recommendation.reason</code>, <code>cues</code>를 표시한다. 예시 식별자 대신 실제 응답의 <code>id</code>를 사용한다. 카드의 시각은 모두 운행 시작 기준 ms다. 플레이어의 자막 시각은 <code>(cue.startMs - card.startMs) / 1000</code>초다.</p>
+<pre>GET /api/media/jobs/{jobId}/clips/{moment}
+POST /api/media/jobs/{jobId}/edits
+Content-Type: application/json
+{"id":"moment-002","title":"다시 듣고 싶은 말"}
+
+→ 202 {"jobId":"새 편집 작업 ID"}</pre>
+<p>편집은 제목·자막·구간 중 바꿀 필드만 보낸다. 제목은 1~80자, <code>captions</code>는 기존 발화와 같은 개수·순서의 문자열(각 200자 이하), <code>startMs/endMs</code>는 선택한 카드 안의 구간이다. 새 ID로 조회해 READY가 된 뒤 <strong>새 ID</strong>로 미리보기와 QR을 발급한다. 원본과 편집본은 다른 버전이다.</p>
+<pre>POST /api/media/jobs/{새 jobId}/clips/{moment}/handoffs
+→ 201 {"id":"…","expiresAt":"…Z","qrImage":"data:image/png;base64,…"}</pre>
+<p><code>img.src = ticket.qrImage</code>로 표시한다. 휴대폰 스캔 → 저장 확인 페이지 → ‘MP4 내려받기’ 순이다. 스캔만으로는 소진되지 않으며, 저장 요청 한 번에만 파일을 준다. 사용·만료·회수·다운로드 중단 후에는 재발급한다. 5분 만료, QR 이미지·코드는 로그에 기록하지 않는다. 카드 미리보기는 BFF에서 Range 요청과 206 응답을 그대로 전달한다.</p>
+<h2 id="list">3. API 목록</h2><p>JSON이 기본이다. 표의 ‘팀’은 HTTPS와 팀 서버 토큰이 필요하다는 뜻이다. 상세 타입·필수값·성공 및 오류 응답은 <a href="/api/v3/api-docs">현재 배포의 명세</a>에서 내려받을 수 있다.</p>
+<table><thead><tr><th>접근</th><th>메서드 · 경로</th><th>결과</th></tr></thead><tbody>
+<tr><td>공개</td><td>GET /api/status</td><td>서비스 상태와 배포 SHA</td></tr>
+<tr><td>공개</td><td>GET /api/integrations</td><td>연동별 operational과 blockers. 차량 자동 입력과 서버 편집 가능 여부를 구분</td></tr>
+<tr><td>공개</td><td>GET /api/export-profiles</td><td>STORY_15, SHORT_30 출력 규격·렌더링/게시 가능 여부</td></tr>
+<tr><td>팀</td><td>GET /api/trips</td><td>등록된 운행 ID 문자열 배열</td></tr>
+<tr><td>팀</td><td>POST /api/media/jobs</td><td>추천 작업 등록 202 + jobId</td></tr>
+<tr><td>팀</td><td>GET /api/media/jobs/{id}</td><td>상태와 READY 결과·추천 카드</td></tr>
+<tr><td>팀</td><td>GET /api/media/jobs/{id}/clips/{moment}</td><td>MP4 200, 부분 읽기 206</td></tr>
+<tr><td>팀</td><td>POST /api/media/jobs/{id}/edits</td><td>새 편집 작업 등록 202 + jobId</td></tr>
+<tr><td>팀</td><td>GET /api/media/jobs/{id}/gleo-callback</td><td>발췌 동의가 있을 때만 차량 앱 전달용 JSON, 선택 필터 theme. 기본 합성 운행은 발췌 동의가 없어 403</td></tr>
+<tr><td>팀</td><td>POST /api/media/jobs/{jobId}/clips/{moment}/handoffs</td><td>본문 없음. QR PNG data URL·회수 ID·만료 시각 201</td></tr>
+<tr><td>팀</td><td>DELETE /api/media/handoffs/{id}</td><td>QR 회수 204</td></tr>
+<tr><td>휴대폰</td><td>GET /api/handoffs/open</td><td>저장 확인 HTML. QR 비밀은 URL fragment에서 읽음</td></tr>
+<tr><td>QR 소지자</td><td>POST /api/handoffs/redeem</td><td>폼(application/x-www-form-urlencoded) id, code → MP4 첨부. 재사용 410</td></tr>
+</tbody></table>
+<h2 id="state">4. 화면 상태와 복구</h2><p>QUEUED → RUNNING → READY 또는 FAILED. READY여도 <code>NO_SPEECH_CANDIDATE</code>면 인식 발화 없음, <code>NO_MEMORY_CANDIDATE</code>면 선정된 구간 없음이다. 빈 카드를 오류로 표시하지 않는다. FAILED는 재시도 동작을 제공한다. 중복 작업은 같은 입력의 완성본을 재사용할 수 있다.</p>
+<p>400 입력 수정 · 401 서버 토큰과 HTTPS 점검 · 403 탑승자/보호자/전사문 제공 등 해당 동의 확인 · 404 운행·카드·작업 다시 조회 · 409 정차/P단·도로 검토·기준 버전 확인 · 410 QR 재발급 · 416 Range 재요청 · 429 대기열이 비면 재시도 · 507 저장공간 확인. 작업 ID와 QR은 프로세스 메모리에 있어 서버 재시작 후 새 작업 요청이 필요하다. 작업 ID는 최근 최대 64개, 미사용 QR은 최대 128개다.</p>
+<h2 id="scope">5. 기획 범위와 남은 작업</h2><p>현재 서버는 사전 등록한 전·후방 영상과 원음을 읽고 추출 동의·P단·도로 검토를 확인한 뒤 한국어 전사 → Gemini 대화 추천 → 세로 영상·자막 생성 → 편집 → 휴대폰 저장을 처리한다. 글레오는 기획상 역할이고 실제 추천 모델은 Gemini다. 위험 구간 제외와 흐림은 제공된 구간표 기준이다.</p>
+<p>실차 카메라 자동 수신·실제 탑승자 신원/동의 수집·자동 얼굴/번호판 검출·제품 원본 파기·개인별 보관함·SNS 작성기는 별도 과제다. 이 팀 작업공간에 실제 승객 음성이나 영상을 등록하지 않는다. QR 다운로드는 인스타그램이나 카카오톡 게시를 의미하지 않는다.</p></main></html>

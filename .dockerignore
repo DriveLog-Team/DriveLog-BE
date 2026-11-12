@@ -1,2 +1,4 @@
 **
 !target/drivelog-api.jar
+!media/
+!media/*.py
