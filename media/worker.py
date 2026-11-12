@@ -166,7 +166,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     start, end = card["startMs"], card["endMs"]
     events = [(0, end-start, "Title", card["title"])]
     if card.get("recommendation", {}).get("provider") == "gemini":
-        events.append((0, min(4200, end-start), "Summary", card["recommendation"]["reason"]))
+        events.append((0, min(4200, end-start), "Summary", card.get("summary") or card["recommendation"]["reason"]))
     route=card.get("driveContext",{})
     places=" → ".join(p for p in (route.get("departure"),route.get("destination")) if p)
     if places:
@@ -236,9 +236,11 @@ def apply_edit(cards, edit, limit):
     texts = edit.get("captions", [c["text"] for c in card["cues"]])
     if not isinstance(texts,list) or len(texts)!=len(card["cues"]) or any(not isinstance(t,str) or len(t)>200 for t in texts):
         raise ValueError("Invalid caption edits")
+    previous_cues=card["cues"]
     card.update(startMs=start,endMs=end,title=title, cues=[dict(c,text=t,startMs=max(start,c["startMs"]),endMs=min(end,c["endMs"]))
         for c,t in zip(card["cues"],texts) if c["endMs"]>start and c["startMs"]<end])
-    card["summary"] = " ".join(c["text"] for c in card["cues"][:2])[:160] or card["title"]
+    if previous_cues!=card["cues"]:
+        card["summary"] = " ".join(c["text"] for c in card["cues"][:2])[:160] or card["title"]
     if "driveContext" in card:
         card["driveContext"]["events"]=[e for e in card["driveContext"]["events"] if start<=e["atMs"]<end]
     if "soundEvent" in card:
@@ -384,6 +386,7 @@ def run(manifest, library, profile, edit_file=None):
             require_audio_consent(manifest)
             if mode == "gleo-demo":
                 selected = gemini_demo.select(cards, authorize_gemini) if cards else []
+                gemini_demo.write_summaries(selected,authorize_gemini)
                 authorize_gemini()
                 with wave.open(str(wav), "rb") as raw:
                     source_start = primary["offsetMs"]

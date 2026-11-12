@@ -36,6 +36,14 @@ class GeminiDemoTest(unittest.TestCase):
         self.assertEqual(len(seen),130)
         self.assertEqual(result[-1]["cues"],cards[-1]["cues"])
 
+    def test_contextual_title_and_summary_need_supported_evidence(self):
+        card=dict(self.cards[0],title="겁났지?",summary="원본")
+        draft={"items":[{"id":card["id"],"title":"곁을 지키는 약속","summary":"걱정하는 상대에게 깨어나면 곁에 있겠다고 말한다.","evidence":[0,1]}]}
+        for supported in (False, True):
+            with patch("gemini_demo.request_json",side_effect=[draft,{"items":[{"id":card["id"],"supported":supported}]}]):
+                gemini_demo.write_summaries([card],lambda:None)
+            self.assertEqual(card["title"],"곁을 지키는 약속" if supported else "겁났지?")
+
     def test_revocation_before_the_request_prevents_transmission(self):
         def revoked():
             raise ValueError("consent revoked")
