@@ -1,5 +1,5 @@
 """Rank short Korean conversations against examples of memories and routine speech."""
-import hashlib
+from file_hash import digest
 import os
 import re
 from pathlib import Path
@@ -46,9 +46,8 @@ class MemoryRanker:
 
         directory = Path(os.environ["MEMORY_MODEL_DIR"])
         for name, expected in MODEL_FILES.items():
-            with (directory / name).open("rb") as stream:
-                if hashlib.file_digest(stream, "sha256").hexdigest() != expected:
-                    raise ValueError(f"Unexpected memory model file: {name}")
+            if digest(directory / name) != expected:
+                raise ValueError(f"Unexpected memory model file: {name}")
         options = ort.SessionOptions()
         options.intra_op_num_threads = 2
         self.session = ort.InferenceSession(str(directory / next(iter(MODEL_FILES))),

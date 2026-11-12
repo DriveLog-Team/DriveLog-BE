@@ -78,6 +78,9 @@ class HandoffTest {
         var image = ImageIO.read(new ByteArrayInputStream(png));
         int w = image.getWidth(), h = image.getHeight();
         var luminance = new RGBLuminanceSource(w,h,image.getRGB(0,0,w,h,null,0,w));
-        return URI.create(new MultiFormatReader().decode(new BinaryBitmap(new HybridBinarizer(luminance))).getText());
+        // The fixture is the original axis-aligned PNG, not a photo of the screen.
+        var bitmap = new BinaryBitmap(new HybridBinarizer(luminance));
+        return URI.create(new MultiFormatReader().decode(bitmap,
+                java.util.Map.of(DecodeHintType.PURE_BARCODE, true)).getText());
     }
 }
