@@ -162,7 +162,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
                                     for a,b,s,t in events), encoding="utf-8-sig")
 
 
-def render(card, tracks, audio_name, wd, dest, blur_intervals=(), masks=()):
+def render(card, tracks, audio_name, wd, dest, blur_intervals=(), masks=(), captions=True):
     start, end = card["startMs"], card["endMs"]
     duration = (end-start)/1000
     args, filters = [], []
@@ -193,7 +193,7 @@ def render(card, tracks, audio_name, wd, dest, blur_intervals=(), masks=()):
         video = "[composite]"
     else:
         video = "[road]"
-    filters.append(video+"ass=captions.ass[video]")
+    filters.append(video+("ass=captions.ass" if captions else "null")+"[video]")
     ff("-loglevel","error",*args,"-filter_complex_threads","1","-filter_complex",";".join(filters),
        "-map","[video]","-map","2:a:0","-t",duration,"-map_metadata","-1","-c:v","libx264",
        "-preset","veryfast","-threads","2","-pix_fmt","yuv420p","-c:a","aac","-movflags","+faststart",dest,cwd=wd)
@@ -228,11 +228,63 @@ def apply_edit(cards, edit, limit):
             card.pop("recommendation")
 
 
+def caption_master(master, offset, card, wd, output):
+    subtitles(card, wd / "captions.ass")
+    ff("-v","error","-ss",(card["startMs"]-offset)/1000,*input_args(master),
+       "-t",(card["endMs"]-card["startMs"])/1000,"-vf","ass=captions.ass",
+       "-map","0:v:0","-map","0:a:0","-map_metadata","-1","-c:v","libx264","-preset","veryfast",
+       "-threads","2","-c:a","aac","-movflags","+faststart",output,cwd=wd)
+
+
+def from_draft(manifest, library, spec, profile, edit_file):
+    canonical = library / spec["access"]["draftVersion"]
+    initial = read_json(canonical/"cards.json")
+    limit = {"STORY_15":15000,"SHORT_30":30000}[profile]
+    edit = read_json(edit_file) if edit_file else None
+    if edit is None and initial["profile"] == profile:
+        return canonical
+    base = edit["baseVersion"] if edit else initial["version"]
+    if not re.fullmatch("[a-f0-9]{32}",base):
+        raise ValueError("Invalid draft version")
+    parent = read_json(library/base/"cards.json")
+    if parent["sourceRevision"] != initial["sourceRevision"]:
+        raise ValueError("Different protected draft")
+    if edit:
+        if parent["profile"] != profile:
+            raise ValueError("Different edit profile")
+        apply_edit(parent["cards"],edit,limit)
+        parent["cards"] = [c for c in parent["cards"] if c["id"]==edit["id"]]
+    else:
+        for card in parent["cards"]:
+            if card["endMs"]-card["startMs"]>limit:
+                anchor=card.get("recommendation",{}).get("quoteStartMs",card["startMs"])
+                start=min(max(card["startMs"],anchor),card["endMs"]-limit)
+                apply_edit([card],dict(id=card["id"],startMs=start,endMs=start+limit),limit)
+    version=hashlib.sha256(json.dumps([initial["version"],profile,edit],sort_keys=True).encode()).hexdigest()[:32]
+    target=library/version
+    if (target/"cards.json").is_file():
+        return target
+    offsets={c["id"]:c["startMs"] for c in initial["cards"]}
+    with tempfile.TemporaryDirectory(dir=library) as tmp:
+        wd=Path(tmp)
+        stage=wd/"release";stage.mkdir()
+        for card in parent["cards"]:
+            require_audio_consent(manifest)
+            caption_master(canonical/("master-"+card["file"]),offsets[card["id"]],card,wd,stage/card["file"])
+        parent.update(version=version,profile=profile)
+        write_json(stage/"cards.json",parent)
+        require_audio_consent(manifest)
+        stage.rename(target)
+    return target
+
+
 def run(manifest, library, profile, edit_file=None):
     manifest = manifest.resolve(strict=True)
     spec = read_json(manifest)
     require_audio_consent(manifest)
     road_review = reviewed_intervals(spec)
+    if spec.get("access",{}).get("draftVersion"):
+        return from_draft(manifest,library.resolve(),spec,profile,edit_file)
     root = manifest.parent
     tracks = {}
     for direction in ("front","rear"):
@@ -317,7 +369,11 @@ def run(manifest, library, profile, edit_file=None):
             if overlapping(card["startMs"],card["endMs"],blocked):
                 raise ValueError("Edit overlaps excluded road footage")
             card["file"] = card["id"]+".mp4"
-            render(card,tracks,audio_name,wd,staging/card["file"],road_review.get("blur", []), masks)
+            personal = "access" in spec
+            dest = staging / (("master-" if personal else "") + card["file"])
+            render(card,tracks,audio_name,wd,dest,road_review.get("blur", []),masks,captions=not personal)
+            if personal:
+                caption_master(dest,card["startMs"],card,wd,staging/card["file"])
         write_json(staging/"cards.json",dict(tripId=spec["tripId"],profile=profile,version=version,sourceRevision=source_revision,
                    status="READY" if selected else ("NO_MEMORY_CANDIDATE" if cues else "NO_SPEECH_CANDIDATE"),
                    cards=selected,privacy=privacy))

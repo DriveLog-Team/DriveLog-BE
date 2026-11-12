@@ -20,6 +20,7 @@ import static org.springframework.http.HttpStatus.*;
 import static java.nio.file.StandardCopyOption.*;
 
 /** Single VM store. One atomic manifest governs both the HTTP API and the media worker. */
+@org.springframework.scheduling.annotation.EnableScheduling
 @Service
 @Profile("media")
 class PrivateTrips {
@@ -51,6 +52,8 @@ class PrivateTrips {
                 if (!Files.isRegularFile(entry.resolve("trip.json"))) continue;
                 ObjectNode doc=read(entry.getFileName().toString());
                 if ("IMPORTING".equals(phase(doc))) finishImport(doc);
+                if(!access(doc).has("draftVersion") && Set.of("READY","UPLOAD","PENDING").contains(phase(doc))) deleteTree(entry.resolve("work"));
+                if(access(doc).has("draftVersion")) deleteTree(entry.resolve("raw"));
                 cleanup(doc);
             }
         }
@@ -130,6 +133,7 @@ class PrivateTrips {
         doc.putObject("roadReview").put("complete",true);
         doc.putObject("extraction").put("gear","P").put("stationary",true).put("occupantCount",people.size());
         ObjectNode a=doc.putObject("access");a.put("owner",reg.owner().toString()).put("phase","PENDING");
+        a.put("expiresAt",Instant.now().plusSeconds(86400).toString());
         a.set("source",json.valueToTree(source));
         a.putObject("uploads");
         a.set("seats",json.valueToTree(reg.occupants()));a.putObject("receipts");
@@ -256,6 +260,36 @@ class PrivateTrips {
         return dir(id).resolve("trip.json");
     }
     synchronized Path work(String id) throws IOException {return Files.createDirectories(dir(id).resolve("work"));}
+    synchronized void protectDraft(String id,Path export) throws IOException {
+        ObjectNode doc=read(id);
+        if(!"READY".equals(phase(doc))) throw new ResponseStatusException(CONFLICT);
+        if(!access(doc).has("draftVersion")) {
+            JsonNode result=json.readTree(export.resolve("cards.json").toFile());
+            for(JsonNode card:result.path("cards")) {
+                if(!Files.isRegularFile(export.resolve("master-"+card.path("file").asText()))) throw new IOException("Protected clip missing");
+            }
+            access(doc).put("draftVersion",export.getFileName().toString());
+            access(doc).put("expiresAt",Instant.now().plusSeconds(86400).toString());
+            store(doc);
+        }
+        deleteTree(dir(id).resolve("raw"));
+    }
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelay=60000)
+    synchronized void expireAbandoned() throws IOException {
+        try(var entries=Files.list(trips)) {
+            for(Path entry:entries.toList()) {
+                if(!Files.isRegularFile(entry.resolve("trip.json"))) continue;
+                ObjectNode doc=read(entry.getFileName().toString());
+                if(Set.of("PENDING","UPLOAD","READY").contains(phase(doc)) && access(doc).has("expiresAt")
+                        && !Instant.parse(access(doc).get("expiresAt").asText()).isAfter(Instant.now())) {
+                    access(doc).put("phase","DISCARDING");
+                    doc.put("audioProcessingConsent",false).put("geminiTranscriptConsent",false);
+                    store(doc);
+                }
+                cleanup(doc);
+            }
+        }
+    }
     synchronized void started(String id){workers.merge(id,1,Integer::sum);}
     synchronized void stopped(String id) throws IOException {
         workers.computeIfPresent(id,(k,n)->n==1?null:n-1);cleanup(read(id));

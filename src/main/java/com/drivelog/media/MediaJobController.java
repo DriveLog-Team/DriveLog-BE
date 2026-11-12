@@ -167,6 +167,7 @@ public class MediaJobController {
             if (!outputRoot.equals(output.getParent()) || !Files.isRegularFile(output.resolve("cards.json")))
                 throw new IOException("Invalid worker output");
             consent(job.manifest());
+            if(PrivateTrips.managed(job.tripId())) privateTrips.protectDraft(job.tripId(),output);
             completed=output;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt(); update(job,"FAILED",null);

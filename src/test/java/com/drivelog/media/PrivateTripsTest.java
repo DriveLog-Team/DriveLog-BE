@@ -41,7 +41,11 @@ class PrivateTripsTest {
         var input=store.input(id,owner);
         var export=Files.createDirectory(store.work(id).resolve("export"));
         var video=Files.writeString(export.resolve("moment-001.mp4"),"edited content");
-        Files.writeString(export.resolve("cards.json"),"{\"cards\":[{\"id\":\"moment-001\",\"title\":\"Memory\",\"startMs\":1000,\"endMs\":6500}]}");
+        Files.writeString(export.resolve("cards.json"),"{\"cards\":[{\"id\":\"moment-001\",\"file\":\"moment-001.mp4\",\"title\":\"Memory\",\"startMs\":1000,\"endMs\":6500}]}");
+        Files.writeString(export.resolve("master-moment-001.mp4"),"protected edit source");
+        store.protectDraft(id,export);
+        assertThat(input.resolveSibling("raw")).doesNotExist();
+        assertThat(Files.readString(input)).contains("draftVersion");
         UUID jobId=UUID.randomUUID();
         var job=new MediaJobController.Job(jobId,id,"STORY_15","READY",input,export,null);
         var media=mock(MediaJobController.class);var req=new MockHttpServletRequest();
