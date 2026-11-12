@@ -5,9 +5,9 @@
 <nav><a href="#private">개인 운행·동의·보관함</a><a href="#auth">연결</a><a href="#flow">호출 순서</a><a href="#list">전체 명세</a><a href="#state">오류·상태</a><a href="#scope">기획 범위</a></nav></header>
 <section id="private"><h2>개인 운행 시작과 동의</h2>
 <p>팀 BFF는 로그인한 사용자별로 <code>POST /api/accounts</code>를 호출해 반환된 <code>accountId</code>와 <code>accessToken</code>을 서버에서 안전하게 보관한다. 이후에는 같은 자격증명을 사용한다. 사용자 요청의 계정 ID를 그대로 믿지 말고 로그인 세션에 연결한 개인 토큰을 선택한다. Swagger의 Authorize에서 운영자 작업은 operatorToken, 개인 작업은 personToken을 사용한다. 하나의 요청에 Bearer 헤더는 하나다.</p>
-<p>수신 담당자가 해당 운행 원본 폴더를 VM의 <code>/opt/drivelog/media/library/private/inbox/&lt;sourceId UUID&gt;</code>로 인계한다. 폴더에는 trip.json, 전·후방 MP4가 필요하다. 앱 UID 10001이 읽고 이동·삭제할 수 있어야 한다. 관리자는 동일 파일시스템에서 원본 폴더 자체를 이동한다. 기존 팀 데모 운행은 기존 호출 방식으로 사용할 수 있다.</p>
+<p>차량은 운행 UUID와 탑승자 명단, 정차 정보를 먼저 등록한다. 전원 동의가 끝나 UPLOAD가 되면 소유자 개인 토큰으로 전·후방 원본을 각각 전송한다.</p>
 <pre>POST /api/private-trips      (팀 서버)
-{"sourceId":"수신 UUID","owner":"소유자 계정 UUID","occupants":[
+{"sourceId":"운행 UUID","source":{"gear":"P","stationary":true,"audioSource":"front","frontOffsetMs":0,"rearOffsetMs":0,"roadReviewed":true},"owner":"소유자 계정 UUID","occupants":[
   {"occupant":"소유자 UUID","under14":false},
   {"occupant":"아동 UUID","under14":true,"guardian":"지정 보호자 UUID"}]}</pre>
 <p>신뢰된 등록 주체가 현장에서 확인한 좌석 순서·연령 구분·보호자 관계를 연결한다. 운행의 인원수와 연령 구분은 등록된 원본 명세와 일치해야 한다. 보호자 신분 확인은 등록 주체의 절차다. 응답의 tripId는 이후 모든 개인 운행 작업에 사용한다.</p>
@@ -16,7 +16,7 @@ GET /api/private-trips/{id}                       (탑승자·지정 보호자)
 PUT /api/private-trips/{id}/consents/{occupant}/PASSENGER  (탑승자 본인)
 PUT /api/private-trips/{id}/consents/{occupant}/GUARDIAN   (지정 보호자)
 {"extraction":true,"geminiTranscript":true}</pre>
-<p>동의 화면에는 원음 전사, 후보 전사문을 Gemini에 보내는 목적, 최종본 저장과 원본 삭제를 표시한다. 성인·아동은 각자 PASSENGER에, 지정 보호자는 아동의 GUARDIAN에 응답한다. 하나라도 거절하거나 철회하면 폐기를 시작한다. 전원이 응답해야 PENDING에서 READY가 된다. 그 뒤 소유자 개인 토큰으로 아래의 <code>POST /api/media/jobs</code>에 개인 tripId를 보내고 편집한다. 미동의 403, 주행 중·도로 검토 미완료 409, 다른 계정의 보관 영상 접근은 404다.</p>
+<p>동의 화면에는 원음 전사, 후보 전사문을 Gemini에 보내는 목적, 최종본 저장과 원본 삭제를 표시한다. 성인·아동은 각자 PASSENGER에, 지정 보호자는 아동의 GUARDIAN에 응답한다. 하나라도 거절하거나 철회하면 폐기를 시작한다. 전원이 동의하면 PENDING → UPLOAD가 된다. PUT /api/private-trips/{id}/media/{side}에 front·rear 파일을 각각 video/mp4로 보낸다. Content-Length와 X-Content-SHA256을 포함한다. 동일 해시 재전송은 안전하다. 두 파일이 검증되면 READY가 된다. 그 뒤 소유자 개인 토큰으로 아래의 <code>POST /api/media/jobs</code>에 개인 tripId를 보내고 편집한다. 미동의 403, 주행 중·도로 검토 미완료 409, 다른 계정의 보관 영상 접근은 404다.</p>
 <h3>편집 확정과 보관함</h3>
 <pre>POST /api/private-trips/{id}/finalize
 {"jobId":"선택한 READY 작업 UUID","moment":"moment-002"}
