@@ -21,8 +21,8 @@ public enum ExportProfile {
             int width, int height, String container, String videoCodec, String destination,
             boolean renderingAvailable, boolean automaticPublicationAvailable) {}
 
-    public Description describe() {
+    public Description describe(boolean rendering) {
         return new Description(name(), targetDurationMs, maximumDurationMs, 1080, 1920,
-                "mp4", "h264", destination, false, false);
+                "mp4", "h264", destination, rendering, false);
     }
 }

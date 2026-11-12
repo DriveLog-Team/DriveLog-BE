@@ -26,7 +26,7 @@ class IntegrationContractTest {
         var spec = tools.jackson.databind.json.JsonMapper.builder().build()
                 .readTree(send("GET", "/api/v3/api-docs").body());
         assertThat(spec.get("paths").propertyNames()).containsExactlyInAnyOrder(
-                "/api/status", "/api/v1/integrations", "/api/v1/export-profiles");
+                "/api/status", "/api/integrations", "/api/export-profiles");
         for (var path : spec.get("paths").propertyNames()) {
             assertThat(send("GET", path).statusCode()).isEqualTo(200);
         }
@@ -34,7 +34,7 @@ class IntegrationContractTest {
 
     @Test
     void reportsUnverifiedVehicleInputWithoutClaimingWorkingIntegrations() throws Exception {
-        var response = send("GET", "/api/v1/integrations");
+        var response = send("GET", "/api/integrations");
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.body()).contains("BLOCKED_VEHICLE_VIDEO_SOURCE_UNVERIFIED", "NO_TARGET_DEVICE")
                 .doesNotContain("\"operational\":true", "\"targetExecutionVerified\":true");
@@ -42,7 +42,7 @@ class IntegrationContractTest {
 
     @Test
     void exposesSeparateStoryAndShortTargetsWithoutClaimingPublication() throws Exception {
-        var response = send("GET", "/api/v1/export-profiles");
+        var response = send("GET", "/api/export-profiles");
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.body()).contains("STORY_15", "SHORT_30", "\"maximumDurationMs\":20000")
                 .doesNotContain("\"renderingAvailable\":true", "\"automaticPublicationAvailable\":true");
@@ -50,8 +50,8 @@ class IntegrationContractTest {
 
     @Test
     void cannotGrantVehiclePermissionThroughThePublicStatusEndpoint() throws Exception {
-        assertThat(send("POST", "/api/v1/integrations").statusCode()).isEqualTo(405);
-        assertThat(send("GET", "/api/v1/trips").statusCode()).isEqualTo(404);
+        assertThat(send("POST", "/api/integrations").statusCode()).isEqualTo(405);
+        assertThat(send("GET", "/api/trips").statusCode()).isEqualTo(404);
     }
 
     private HttpResponse<String> send(String method, String path) throws Exception {
