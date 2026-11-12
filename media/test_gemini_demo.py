@@ -23,6 +23,19 @@ class GeminiDemoTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 gemini_demo.resolve_choices(self.cards, choices)
 
+    def test_long_trip_includes_last_window_and_preserves_original_cues(self):
+        cards=[{"id":f"moment-{i:03}","cues":[{"text":str(i),"startMs":i*60000,"endMs":i*60000+500}]} for i in range(130)]
+        seen=set()
+        def rank(group,authorize):
+            authorize()
+            seen.update(c["id"] for c in group)
+            return [dict(c,recommendation=dict(quote=c["cues"][0]["text"],quoteStartMs=c["cues"][0]["startMs"],
+                                               quoteEndMs=c["cues"][0]["endMs"])) for c in group[-3:]]
+        with patch("gemini_demo.select_batch",side_effect=rank):
+            result=gemini_demo.select(cards,lambda:None)
+        self.assertEqual(len(seen),130)
+        self.assertEqual(result[-1]["cues"],cards[-1]["cues"])
+
     def test_revocation_before_the_request_prevents_transmission(self):
         def revoked():
             raise ValueError("consent revoked")

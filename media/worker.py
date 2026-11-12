@@ -1,5 +1,6 @@
 """Local DriveLog media worker. Inputs are trusted job manifests from the ingest stage."""
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -73,7 +74,8 @@ def transcribe(audio, wd, source_offset, manifest_path, blocked=()):
     model = os.environ["WHISPER_MODEL"]
     safe = [(a-source_offset,b-source_offset) for s,e in intervals(duration,silence)
             for a,b in road_privacy.safe_parts(source_offset+s,source_offset+e,blocked) if b-a >= 500]
-    for group, (start, end) in enumerate(safe):
+    windows=((start,min(start+30000,end)) for begin,end in safe for start in range(begin,end,30000))
+    for group, (start, end) in enumerate(windows):
         require_audio_consent(manifest_path)
         chunk = wd / "speech.wav"
         ff("-ss", start / 1000, *input_args(audio), "-t", (end-start)/1000, "-c:a", "pcm_s16le", chunk)
@@ -323,9 +325,9 @@ def run(manifest, library, profile, edit_file=None):
     target = library/version
     if (target/"cards.json").is_file():
         return target
-    with tempfile.TemporaryDirectory(dir=library) as temp:
+    with tempfile.TemporaryDirectory(dir=library) as temp, closing(road_privacy.MaskStore(Path(temp)/"masks.sqlite")) as mask_store:
         wd = Path(temp)
-        masks, blocked, privacy = road_privacy.scan(tracks, road_review, lambda: require_audio_consent(manifest))
+        masks, blocked, privacy = road_privacy.scan(tracks, road_review, lambda: require_audio_consent(manifest),mask_store)
         cues = []
         if edit is not None:
             base = edit.get("baseVersion","")

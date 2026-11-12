@@ -60,13 +60,49 @@ def resolve_choices(cards, choices):
     return selected
 
 
+def candidate_payload(card):
+    return {"id":card["id"],"lines":[s["text"] for s in card["cues"]]}
+
+
+def batches(cards):
+    batch, size = [], 2
+    for card in cards:
+        cost = len(json.dumps(candidate_payload(card),ensure_ascii=False)) + 2
+        if cost > 47998:
+            raise ValueError("One candidate exceeds the model input budget")
+        if batch and (len(batch) >= 64 or size+cost > 48000):
+            yield batch
+            batch, size = [], 2
+        batch.append(card)
+        size += cost
+    if batch:
+        yield batch
+
+
 def select(cards, authorize_transcript):
-    if not cards:
+    groups=list(batches(cards))
+    if not groups:
         return []
-    content = json.dumps([{"id": c["id"], "lines": [s["text"] for s in c["cues"]]} for c in cards],
-                         ensure_ascii=False)
-    if len(cards) > 64 or len(content) > 48000:
-        raise ValueError("Demo trip exceeds the single-request limit")
+    if len(groups)==1:
+        return select_batch(groups[0],authorize_transcript)
+    winners=[winner for group in groups for winner in select_batch(group,authorize_transcript)]
+    originals={c["id"]:c for c in winners}
+    while len(winners)>3:
+        evidence=[]
+        for card in winners:
+            rec=card["recommendation"]
+            evidence.append(dict(card,cues=[dict(text=rec["quote"][:320],startMs=rec["quoteStartMs"],endMs=rec["quoteEndMs"])]))
+        winners=[winner for group in batches(evidence) for winner in select_batch(group,authorize_transcript)]
+    if len(winners)>1:
+        # A final comparison also orders winners from different batches when only 2 or 3 survived.
+        evidence=[dict(c,cues=[dict(text=c["recommendation"]["quote"][:320],startMs=c["recommendation"]["quoteStartMs"],
+                                   endMs=c["recommendation"]["quoteEndMs"])]) for c in winners]
+        winners=select_batch(evidence,authorize_transcript)
+    return [dict(originals[w["id"]],rank=i+1) for i,w in enumerate(winners)]
+
+
+def select_batch(cards, authorize_transcript):
+    content = json.dumps([candidate_payload(c) for c in cards], ensure_ascii=False)
     headers = {"Content-Type": "application/json"}
     if os.environ.get("GEMINI_API_KEY"):
         headers["x-goog-api-key"] = os.environ["GEMINI_API_KEY"]

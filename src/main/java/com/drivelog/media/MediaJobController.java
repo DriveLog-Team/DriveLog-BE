@@ -141,6 +141,9 @@ public class MediaJobController {
         return ResponseEntity.accepted().cacheControl(CacheControl.noStore()).body(Map.of("jobId",id));
     }
 
+    @org.springframework.beans.factory.annotation.Value("${media.worker-timeout-minutes:720}")
+    private long workerTimeoutMinutes;
+
     private void process(Job job, Edit edit, String baseVersion) {
         Path editPath = null;
         Process process = null;
@@ -161,7 +164,7 @@ public class MediaJobController {
                 command.addAll(List.of("--edit",editPath.toString()));
             }
             process = new ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.DISCARD).start();
-            if (!process.waitFor(60,TimeUnit.MINUTES) || process.exitValue()!=0) throw new IOException("Worker failed");
+            if (!process.waitFor(workerTimeoutMinutes,TimeUnit.MINUTES) || process.exitValue()!=0) throw new IOException("Worker failed");
             String result = new String(process.getInputStream().readNBytes(4096), StandardCharsets.UTF_8).strip();
             Path output = outputRoot.resolve(result).toRealPath();
             if (!outputRoot.equals(output.getParent()) || !Files.isRegularFile(output.resolve("cards.json")))
