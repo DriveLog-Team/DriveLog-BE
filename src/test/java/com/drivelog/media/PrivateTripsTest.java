@@ -17,6 +17,27 @@ class PrivateTripsTest {
         "occupants":[{"ageBand":"14plus","allowed":true},{"ageBand":"under14","guardianAllowed":true}]},
         "audioProcessingConsent":true,"geminiTranscriptConsent":true,"roadReview":{"complete":true}}
         """;
+    @Test void routeNeedsEveryReceiptAndWithdrawalPurgesIt() throws Exception {
+        var store=new PrivateTrips(library);
+        UUID owner=store.issue().accountId(),child=store.issue().accountId();
+        var spec=new PrivateTrips.Registration(UUID.randomUUID(),owner,
+            List.of(new PrivateTrips.Seat(owner,false,null),new PrivateTrips.Seat(child,true,owner)),
+            new PrivateTrips.Source("P",true,"front",0,0,true));
+        String id=store.register(spec).tripId();
+        var optIn=new PrivateTrips.Decision(true,true,true);
+        store.decide(id,owner,PrivateTrips.Role.PASSENGER,owner,optIn);
+        store.decide(id,child,PrivateTrips.Role.PASSENGER,child,optIn);
+        store.decide(id,child,PrivateTrips.Role.GUARDIAN,owner,new PrivateTrips.Decision(true,true,false));
+        var context=new PrivateTrips.DriveContext("서울","속초",List.of(new PrivateTrips.DriveEvent(1234,PrivateTrips.EventKind.ARRIVAL,"속초")));
+        assertThatThrownBy(()->store.attachContext(id,owner,context)).isInstanceOf(ResponseStatusException.class);
+        store.decide(id,child,PrivateTrips.Role.GUARDIAN,owner,optIn);
+        store.attachContext(id,owner,context);
+        var manifest=library.resolve("private/trips/"+id+"/trip.json");
+        assertThat(Files.readString(manifest)).contains("속초");
+        assertThat(store.decide(id,child,PrivateTrips.Role.GUARDIAN,owner,new PrivateTrips.Decision(true,true,false)).phase()).isEqualTo("DISCARDED");
+        assertThat(Files.readString(manifest)).doesNotContain("속초");
+    }
+
     @Test void independentDecisionsThenFinalizeAndResumeInterruptedPurge() throws Exception {
         var store=new PrivateTrips(library);
         UUID owner=store.issue().accountId(), child=store.issue().accountId(), guardian=store.issue().accountId(),source=UUID.randomUUID();

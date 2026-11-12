@@ -139,6 +139,14 @@ def plain(text):
     return " ".join(text.split()).replace("\\", "＼").replace("{", "｛").replace("}", "｝")
 
 
+def attach_context(cards, context):
+    if not context:
+        return
+    for card in cards:
+        events=[e for e in context.get("events",[]) if card["startMs"]<=e["atMs"]<card["endMs"]]
+        card["driveContext"]=dict(departure=context.get("departure"),destination=context.get("destination"),events=events)
+
+
 def subtitles(card, path):
     style = """[Script Info]
 ScriptType: v4.00+
@@ -150,6 +158,8 @@ Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackC
 Style: Caption,Noto Sans CJK KR,54,&H00FFFFFF,&H00FFFFFF,&H00202020,&HA0000000,0,0,0,0,100,100,0,0,1,3,1,2,55,55,96,1
 Style: Title,Noto Sans CJK KR,58,&H00FFFFFF,&H00FFFFFF,&H00202020,&HA0000000,-1,0,0,0,100,100,0,0,1,3,1,8,55,55,68,1
 Style: Summary,Noto Sans CJK KR,37,&H00FFFFFF,&H00FFFFFF,&H00202020,&HA0000000,0,0,0,0,100,100,0,0,1,2,1,8,60,60,210,1
+Style: Route,Noto Sans CJK KR,32,&H00FFFFFF,&H00FFFFFF,&H00202020,&HA0000000,0,0,0,0,100,100,0,0,1,2,1,2,48,48,30,1
+Style: Place,Noto Sans CJK KR,32,&H00FFFFFF,&H00FFFFFF,&H00202020,&HA0000000,0,0,0,0,100,100,0,0,1,2,1,8,48,48,285,1
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
@@ -157,6 +167,14 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
     events = [(0, end-start, "Title", card["title"])]
     if card.get("recommendation", {}).get("provider") == "gemini":
         events.append((0, min(4200, end-start), "Summary", card["recommendation"]["reason"]))
+    route=card.get("driveContext",{})
+    places=" → ".join(p for p in (route.get("departure"),route.get("destination")) if p)
+    if places:
+        events.append((0,end-start,"Route",places))
+    for event in route.get("events",[]):
+        if event.get("label"):
+            at=max(0,event["atMs"]-start)
+            events.append((at,min(at+2200,end-start),"Place",event["label"]))
     for cue in card["cues"]:
         a, b = max(start, cue["startMs"]), min(end, cue["endMs"])
         if a < b:
@@ -221,6 +239,8 @@ def apply_edit(cards, edit, limit):
     card.update(startMs=start,endMs=end,title=title, cues=[dict(c,text=t,startMs=max(start,c["startMs"]),endMs=min(end,c["endMs"]))
         for c,t in zip(card["cues"],texts) if c["endMs"]>start and c["startMs"]<end])
     card["summary"] = " ".join(c["text"] for c in card["cues"][:2])[:160] or card["title"]
+    if "driveContext" in card:
+        card["driveContext"]["events"]=[e for e in card["driveContext"]["events"] if start<=e["atMs"]<end]
     if "soundEvent" in card:
         event=card["soundEvent"]
         if not overlapping(start,end,[(event["startMs"],event["endMs"])]):
@@ -360,6 +380,7 @@ def run(manifest, library, profile, edit_file=None):
                     os.replace(draft,cache)
             cards = make_cards(cues,limit)
             cards = [card for card in cards if not overlapping(card["startMs"], card["endMs"], blocked)]
+            attach_context(cards,spec.get("driveContext"))
             require_audio_consent(manifest)
             if mode == "gleo-demo":
                 selected = gemini_demo.select(cards, authorize_gemini) if cards else []
@@ -381,6 +402,7 @@ def run(manifest, library, profile, edit_file=None):
                             end=primary["offsetMs"]+raw.getnframes()*1000//raw.getframerate()
                         others=[(c["startMs"],c["endMs"]) for c in selected if c is not card]
                         add_surrounding_footage(card,cues,primary["offsetMs"],end,blocked+others,limit)
+        attach_context(selected,spec.get("driveContext"))
         staging = wd/"release"
         staging.mkdir()
         for card in selected:

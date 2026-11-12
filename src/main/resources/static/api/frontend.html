@@ -17,6 +17,8 @@ PUT /api/private-trips/{id}/consents/{occupant}/PASSENGER  (탑승자 본인)
 PUT /api/private-trips/{id}/consents/{occupant}/GUARDIAN   (지정 보호자)
 {"extraction":true,"geminiTranscript":true}</pre>
 <p>동의 화면에는 원음 전사, 후보 전사문을 Gemini에 보내는 목적, 최종본 저장과 원본 삭제를 표시한다. 성인·아동은 각자 PASSENGER에, 지정 보호자는 아동의 GUARDIAN에 응답한다. 하나라도 거절하거나 철회하면 폐기를 시작한다. 전원이 동의하면 PENDING → UPLOAD가 된다. PUT /api/private-trips/{id}/media/{side}에 front·rear 파일을 각각 video/mp4로 보낸다. Content-Length와 X-Content-SHA256을 포함한다. 동일 해시 재전송은 안전하다. 두 파일이 검증되면 READY가 된다. 그 뒤 소유자 개인 토큰으로 아래의 <code>POST /api/media/jobs</code>에 개인 tripId를 보내고 편집한다. 미동의 403, 주행 중·도로 검토 미완료 409, 다른 계정의 보관 영상 접근은 404다.</p>
+<p>주행 정보를 사용하려면 승객·보호자 모두 동의 응답에 useTripContext:true를 보낸다. UPLOAD 상태에서 소유자가 PUT /api/private-trips/{id}/context를 호출한다. 선택 입력이며 장소명은 자막에, 대화와 겹친 이벤트 종류는 추천에 사용된다.</p>
+<pre>{"departure":"서울","destination":"속초","events":[{"atMs":12000,"kind":"NEAR_ARRIVAL","label":"속초 도착 직전"}]}</pre>
 <h3>편집 확정과 보관함</h3>
 <pre>POST /api/private-trips/{id}/finalize
 {"jobId":"선택한 READY 작업 UUID","moment":"moment-002"}

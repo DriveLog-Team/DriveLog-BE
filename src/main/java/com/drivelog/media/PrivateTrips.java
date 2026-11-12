@@ -29,8 +29,13 @@ class PrivateTrips {
     record Registration(UUID sourceId, UUID owner, List<Seat> occupants, Source source) {}
     record Source(String gear, boolean stationary, String audioSource, long frontOffsetMs, long rearOffsetMs, boolean roadReviewed) {}
     enum Role { PASSENGER, GUARDIAN }
-    record Decision(Boolean extraction, Boolean geminiTranscript) {}
-    record Receipt(Role role, UUID occupant, UUID actor, boolean extraction, boolean geminiTranscript, String at) {}
+    record Decision(Boolean extraction, Boolean geminiTranscript, Boolean useTripContext) {
+        Decision(Boolean extraction, Boolean geminiTranscript){this(extraction,geminiTranscript,false);}
+    }
+    enum EventKind { LANDMARK, NEAR_ARRIVAL, ARRIVAL }
+    record DriveEvent(long atMs, EventKind kind, String label) {}
+    record DriveContext(String departure,String destination,List<DriveEvent> events) {}
+    record Receipt(Role role, UUID occupant, UUID actor, boolean extraction, boolean geminiTranscript, boolean useTripContext, String at) {}
     record Trip(String tripId, UUID owner, String phase, List<Seat> occupants, List<Receipt> receipts) {}
     record Selection(UUID jobId, String moment) {}
     record Item(String tripId, String title, long durationMs, String savedAt) {}
@@ -242,11 +247,40 @@ class PrivateTrips {
         if("DISCARDED".equals(phase(doc)) && !yes) return view(doc);
         if(!Set.of("PENDING","UPLOAD","READY","SAVED").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
         var receipts=(ObjectNode)access(doc).get("receipts");String key=occupant+"/"+role;
-        if(yes && agreed(receipts.path(key))) return view(doc);
-        receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),Instant.now().toString())));
+        boolean context=Boolean.TRUE.equals(d.useTripContext());
+        if(yes && agreed(receipts.path(key))) {
+            if(receipts.path(key).path("useTripContext").asBoolean()==context) return view(doc);
+            if(!context && access(doc).path("usedContext").asBoolean()) {
+                receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),false,Instant.now().toString())));
+                return discardContext(doc);
+            }
+            if(!Set.of("PENDING","UPLOAD").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
+        }
+        receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),context,Instant.now().toString())));
         boolean all=refresh(doc);
-        access(doc).put("phase",yes?(all?(access(doc).has("uploads")?"UPLOAD":"READY"):"PENDING"):"DISCARDING");
+        access(doc).put("phase",yes?(all?(access(doc).has("uploads") && access(doc).get("uploads").size()<2?"UPLOAD":"READY"):"PENDING"):"DISCARDING");
         store(doc);cleanup(doc);return view(doc);
+    }
+    private Trip discardContext(ObjectNode doc) throws IOException {
+        access(doc).put("phase","DISCARDING");
+        doc.put("audioProcessingConsent",false).put("geminiTranscriptConsent",false);
+        store(doc);cleanup(doc);return view(doc);
+    }
+    private boolean validLabel(String label) {
+        return label==null || (label.length()<=64 && label.codePoints().noneMatch(Character::isISOControl));
+    }
+    synchronized Trip attachContext(String id,UUID actor,DriveContext context) throws IOException {
+        owner(id,actor);ObjectNode doc=read(id);
+        if(!"UPLOAD".equals(phase(doc))) throw new ResponseStatusException(CONFLICT);
+        for(JsonNode receipt:access(doc).get("receipts"))
+            if(!receipt.path("useTripContext").asBoolean()) throw new ResponseStatusException(FORBIDDEN);
+        if(context==null || !validLabel(context.departure()) || !validLabel(context.destination())
+                || context.events()==null || context.events().size()>128) throw new ResponseStatusException(BAD_REQUEST);
+        for(DriveEvent event:context.events()) {
+            if(event==null || event.atMs()<0 || event.kind()==null || !validLabel(event.label())) throw new ResponseStatusException(BAD_REQUEST);
+        }
+        doc.set("driveContext",json.valueToTree(context));access(doc).put("usedContext",true);
+        store(doc);return view(doc);
     }
     synchronized void owner(String id, UUID person) throws IOException {
         if(!access(read(id)).path("owner").asText().equals(person.toString())) throw new ResponseStatusException(NOT_FOUND);
@@ -269,6 +303,7 @@ class PrivateTrips {
                 if(!Files.isRegularFile(export.resolve("master-"+card.path("file").asText()))) throw new IOException("Protected clip missing");
             }
             access(doc).put("draftVersion",export.getFileName().toString());
+            doc.remove("driveContext");
             access(doc).put("expiresAt",Instant.now().plusSeconds(86400).toString());
             store(doc);
         }
@@ -328,6 +363,7 @@ class PrivateTrips {
         if(workers.containsKey(id) || !Set.of("SAVING","DISCARDING").contains(phase)) return;
         Path folder=dir(id);
         deleteTree(folder.resolve("raw"));deleteTree(folder.resolve("work"));
+        doc.remove("driveContext");
         if("DISCARDING".equals(phase)) {Files.deleteIfExists(folder.resolve("saved.mp4"));access(doc).remove("item");}
         access(doc).put("phase","SAVING".equals(phase)?"SAVED":"DISCARDED");
         store(doc);

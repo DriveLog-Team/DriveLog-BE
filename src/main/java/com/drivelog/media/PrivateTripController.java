@@ -47,6 +47,12 @@ class PrivateTripController {
     PrivateTrips.Trip upload(@PathVariable String id,@PathVariable String side,@RequestHeader("X-Content-SHA256") String sha,HttpServletRequest req) throws IOException {
         return store.upload(id,store.person(req),side,sha,req.getContentLengthLong(),req.getInputStream());
     }
+    @PutMapping("/private-trips/{id}/context")
+    @Operation(operationId="attachDriveContext",summary="전원 위치 맥락 동의 후 출발·도착지 및 운행 이벤트 등록",security=@SecurityRequirement(name="personToken"))
+    @ApiResponse(responseCode="200",description="맥락 등록 후 운행 상태",useReturnTypeSchema=true)
+    PrivateTrips.Trip context(@PathVariable String id,@RequestBody PrivateTrips.DriveContext context,HttpServletRequest req)throws IOException {
+        return store.attachContext(id,store.person(req),context);
+    }
     @GetMapping("/private-trips")
     @ApiResponse(responseCode="200",description="본인에게 배정된 운행 배열",useReturnTypeSchema=true)
     @Operation(operationId="listAssignedTrips",summary="본인이 탑승자 또는 보호자인 운행 목록",security=@SecurityRequirement(name="personToken"))
