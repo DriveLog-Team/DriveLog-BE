@@ -94,7 +94,7 @@ public class MediaJobController {
             schema=@Schema(implementation=Request.class),examples={
             @ExampleObject(name="추천 요청",value="{\"tripId\":\"demo\",\"profile\":\"STORY_15\"}"),
             @ExampleObject(name="자막 편집",value="{\"tripId\":\"demo\",\"profile\":\"STORY_15\",\"baseJob\":\"a22e6666-e52c-483f-ac84-a12f64d20200\",\"edit\":{\"id\":\"moment-002\",\"captions\":[\"눈 뜨면 내가 제일 먼저 보일 거야.\"]}}")}))
-    @Operation(operationId="submitMediaJob", summary="운행 추천 또는 기존 카드 편집 요청", description="202는 대기열 등록을 뜻한다. 반환된 jobId로 처리 상태를 조회한다.")
+    @Operation(operationId="submitMediaJob", summary="운행 추천 또는 기존 카드 편집 요청", description="202는 대기열 등록을 뜻한다. 동의 확인 후 양쪽 도로 카메라를 검사한다. 근접 보행자 시간대는 영상·원음·전사 대상에서 제외하고 검출 얼굴·번호판은 MP4에 블러 처리한다. 별도 검출 요청은 필요 없다.")
     @ApiResponse(responseCode="202", description="작업 등록", content=@Content(schema=@Schema(implementation=MediaContract.Accepted.class)))
     @ApiResponse(responseCode="400", description="운행·프로필·편집 조합 오류", content=@Content)
     @ApiResponse(responseCode="404", description="운행 또는 기준 카드 없음", content=@Content)
@@ -222,7 +222,7 @@ public class MediaJobController {
             throw error(HttpStatus.CONFLICT);
     }
     @GetMapping("/{id}")
-    @Operation(operationId="getMediaJob", summary="작업 상태와 추천 카드 조회")
+    @Operation(operationId="getMediaJob", summary="작업 상태와 추천 카드 조회", description="READY이면 result.privacy에서 전·후방 검사 통계와 제외 구간(ms)을 확인한다. 검사 또는 렌더 실패는 FAILED이고 MP4를 제공하지 않는다.")
     @ApiResponse(responseCode="200", description="작업 상태. 후보 0개도 READY로 완료될 수 있다.", content=@Content(schema=@Schema(implementation=MediaContract.Status.class)))
     @ApiResponse(responseCode="404", description="등록되지 않은 작업", content=@Content)
     public ResponseEntity<?> status(@PathVariable UUID id,HttpServletRequest req) throws IOException {
