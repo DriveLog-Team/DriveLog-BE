@@ -6,9 +6,11 @@ RUN mkdir /src && curl -fsSL --retry 3 https://codeload.github.com/ggml-org/whis
 FROM eclipse-temurin:21-jre-jammy
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-pip ffmpeg fonts-noto-cjk libgomp1 && rm -rf /var/lib/apt/lists/*
 ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 OPENVINO_TELEMETRY_OPTOUT=1
-RUN python3 -m pip install --no-cache-dir openvino==2025.3.0 numpy==1.26.4
+RUN python3 -m pip install --no-cache-dir openvino==2025.3.0 numpy==1.26.4 tflite-runtime==2.14.0
 COPY media/fetch_privacy_models.py media/OPEN_MODEL_ZOO_LICENSE /opt/road-models/
 RUN python3 /opt/road-models/fetch_privacy_models.py /opt/road-models
+COPY media/sound_events.py media/extraction_policy.py /tmp/sound-model/
+RUN cd /tmp/sound-model && python3 -c "import hashlib,urllib.request,sound_events as s; b=urllib.request.urlopen(s.MODEL_URL,timeout=60).read(); assert hashlib.sha256(b).hexdigest()==s.SHA256; open('/opt/road-models/yamnet.tflite','wb').write(b)"
 COPY --from=speech /build/bin/whisper-cli /usr/local/bin/
 RUN groupadd --gid 10001 drivelog && useradd --uid 10001 --gid drivelog --no-create-home drivelog
 WORKDIR /app

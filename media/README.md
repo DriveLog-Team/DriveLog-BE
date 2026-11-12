@@ -11,3 +11,5 @@
 도로 보호는 서버 CPU에서 [Open Model Zoo](https://github.com/openvinotoolkit/open_model_zoo/tree/2023.0.0/models/intel)의 face-detection-retail-0004, vehicle-license-plate-detection-barrier-0106, person-detection-retail-0013 모델을 사용한다. Docker 빌드에서 FP16 가중치와 XML의 SHA-384를 확인한다. `OPEN_MODEL_ZOO_LICENSE`에 모델 고지를 포함한다. 런타임 모델 다운로드는 없다.
 
 10fps로 양쪽 영상을 검사하고 카메라별 offsetMs를 운행 시간에 합산한다. 얼굴·번호판은 검출 상자를 35%씩 넓히고 좌우 시간 여유 250ms를 준다. 보행자가 카메라 패널 높이의 36% 이상이거나 22% 이상이면서 하단 72% 지점에 닿으면 해당 시각 전후 600ms까지 전사·편집에서 제외한다. 이는 시연용 화면 기준으로 실측 거리나 실차 검출률을 보장하지 않는다. 번호판 모델의 학습 도메인은 중국식 정면 번호판이다. 배포 전 보관된 영상은 재인코딩하지 않는다.
+
+웃음·옹알이 검출에는 Google [YAMNet](https://github.com/tensorflow/models/tree/master/research/audioset/yamnet) (Apache-2.0, MediaPipe float32 모델 1)을 사용한다. 서버에서 16kHz 모노 PCM을 분류하고 근접 보행자 구간과 겹치는 입력은 제외한다. score는 모델 출력값이다.

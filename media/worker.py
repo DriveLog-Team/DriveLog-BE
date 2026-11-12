@@ -11,6 +11,7 @@ import tempfile
 import wave
 import gemini_demo
 import road_privacy
+import sound_events
 from file_hash import digest
 from extraction_policy import require_extraction, reviewed_intervals, overlapping
 from semantic_ranker import MemoryRanker, REVISION
@@ -219,7 +220,13 @@ def apply_edit(cards, edit, limit):
         raise ValueError("Invalid caption edits")
     card.update(startMs=start,endMs=end,title=title, cues=[dict(c,text=t,startMs=max(start,c["startMs"]),endMs=min(end,c["endMs"]))
         for c,t in zip(card["cues"],texts) if c["endMs"]>start and c["startMs"]<end])
-    card["summary"] = " ".join(c["text"] for c in card["cues"][:2])[:160]
+    card["summary"] = " ".join(c["text"] for c in card["cues"][:2])[:160] or card["title"]
+    if "soundEvent" in card:
+        event=card["soundEvent"]
+        if not overlapping(start,end,[(event["startMs"],event["endMs"])]):
+            card.pop("soundEvent")
+        else:
+            event.update(startMs=max(start,event["startMs"]),endMs=min(end,event["endMs"]))
     if "recommendation" in card:
         reason = card["recommendation"]
         evidence = next((c for c in card["cues"] if c["startMs"] < reason["quoteEndMs"]
@@ -320,7 +327,7 @@ def run(manifest, library, profile, edit_file=None):
     media_spec = {k: v for k, v in spec.items() if k not in ("gleoExcerptConsent", "geminiTranscriptConsent", "recommendationMode")}
     source_revision = hashlib.sha256(json.dumps([key,media_spec,hashes],
                                                 sort_keys=True).encode()).hexdigest()
-    fingerprint = [source_revision,profile,edit,"render-v3",gemini_demo.REVISION if mode == "gleo-demo" else REVISION]
+    fingerprint = [source_revision,profile,edit,"render-audio-events-v1",gemini_demo.REVISION if mode == "gleo-demo" else REVISION]
     version = hashlib.sha256(json.dumps(fingerprint,sort_keys=True).encode()).hexdigest()[:32]
     target = library/version
     if (target/"cards.json").is_file():
@@ -341,10 +348,10 @@ def run(manifest, library, profile, edit_file=None):
             selected = [next(c for c in cards if c["id"] == edit["id"])]
         else:
             wav = wd/"audio.wav"
+            ff("-loglevel","error",*input_args(primary["path"]),"-map","0:a:0","-vn","-ar","16000","-ac","1","-c:a","pcm_s16le",wav)
             if mode == "local" and cache.is_file():
                 cues = read_json(cache)
             else:
-                ff("-loglevel","error",*input_args(primary["path"]),"-map","0:a:0","-vn","-ar","16000","-ac","1","-c:a","pcm_s16le",wav)
                 cues = transcribe(wav,wd,primary["offsetMs"],manifest,blocked)
                 require_audio_consent(manifest)
                 if mode == "local":
@@ -364,6 +371,16 @@ def run(manifest, library, profile, edit_file=None):
                     add_surrounding_footage(card, cues, source_start, source_end, blocked, limit)
             else:
                 selected = MemoryRanker().select(cards) if cards else []
+            if len(selected)<3:
+                events=sound_events.detect(wav,primary["offsetMs"],blocked,lambda:require_audio_consent(manifest))
+                last_id=max((int(c["id"].split("-")[1]) for c in cards),default=0)
+                sound_events.add_cards(selected,events,last_id,limit)
+                for card in selected:
+                    if card.get("soundEvent"):
+                        with wave.open(str(wav),"rb") as raw:
+                            end=primary["offsetMs"]+raw.getnframes()*1000//raw.getframerate()
+                        others=[(c["startMs"],c["endMs"]) for c in selected if c is not card]
+                        add_surrounding_footage(card,cues,primary["offsetMs"],end,blocked+others,limit)
         staging = wd/"release"
         staging.mkdir()
         for card in selected:
