@@ -41,7 +41,7 @@ public class HandoffController {
             @Schema(description="QR 이미지의 data:image/png;base64 URL") String qrImage) {}
     public record Redemption(@Schema(requiredMode=Schema.RequiredMode.REQUIRED) UUID id,
             @Schema(requiredMode=Schema.RequiredMode.REQUIRED, minLength=43, maxLength=43) String code) {}
-    private record Grant(MediaJobController.Job job, String moment, byte[] secret, Instant expires) {}
+    private record Grant(MediaJobController.Job job, String savedTrip, UUID owner, String moment, byte[] secret, Instant expires) {}
     private final MediaJobController media;
     private final Map<UUID,Grant> grants = new HashMap<>();
     private final SecureRandom random = new SecureRandom();
@@ -66,7 +66,7 @@ public class HandoffController {
 
     @PostMapping("/api/media/jobs/{jobId}/clips/{moment}/handoffs")
     @Operation(operationId="issueHandoff", summary="카드 1개의 일회용 다운로드 QR 발급",
-            security=@SecurityRequirement(name="operatorToken"))
+            security={@SecurityRequirement(name="operatorToken"),@SecurityRequirement(name="personToken")})
     @ApiResponse(responseCode="201", description="QR과 회수 ID", content=@Content(schema=@Schema(implementation=Ticket.class)))
     @ApiResponse(responseCode="401", description="운영자 인증 필요", content=@Content)
     @ApiResponse(responseCode="403", description="동의 누락", content=@Content)
@@ -77,6 +77,19 @@ public class HandoffController {
             HttpServletRequest req) throws IOException, WriterException {
         var job = media.owned(jobId, req);
         media.clip(job, moment);
+        UUID owner=PrivateTrips.managed(job.tripId()) ? media.privateTrips.person(req) : null;
+        return grant(job,null,owner,moment);
+    }
+
+    @PostMapping("/api/library/{tripId}/handoffs")
+    @Operation(summary="개인 보관 영상의 일회용 QR 발급",security=@SecurityRequirement(name="personToken"))
+    @ApiResponse(responseCode="201",description="5분간 유효한 QR",content=@Content(schema=@Schema(implementation=Ticket.class)))
+    public synchronized ResponseEntity<Ticket> savedQr(@PathVariable String tripId,HttpServletRequest req) throws IOException, WriterException {
+        UUID owner=media.privateTrips.person(req);media.privateTrips.saved(tripId,owner);
+        return grant(null,tripId,owner,"saved");
+    }
+
+    private ResponseEntity<Ticket> grant(MediaJobController.Job job,String savedTrip,UUID owner,String moment) throws IOException,WriterException {
         Instant now = Instant.now();
         grants.values().removeIf(g -> !g.expires().isAfter(now));
         if (grants.size() >= 128) throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS);
@@ -87,7 +100,7 @@ public class HandoffController {
         String base = origin;
         String qr = qrImage(base + "/api/handoffs/open#" + id + "." + code);
         Instant expires = now.plus(lifetime);
-        grants.put(id, new Grant(job, moment, secret, expires));
+        grants.put(id, new Grant(job,savedTrip,owner,moment,secret,expires));
         return ResponseEntity.status(201).cacheControl(CacheControl.noStore()).body(new Ticket(id, expires, qr));
     }
 
@@ -103,11 +116,15 @@ public class HandoffController {
     }
 
     @DeleteMapping("/api/media/handoffs/{id}")
-    @Operation(operationId="revokeHandoff", summary="발급한 QR 회수", security=@SecurityRequirement(name="operatorToken"))
+    @Operation(operationId="revokeHandoff", summary="발급한 QR 회수", security={@SecurityRequirement(name="operatorToken"),@SecurityRequirement(name="personToken")})
     @ApiResponse(responseCode="204", description="회수 완료. 이미 사용·만료된 ID도 동일", content=@Content)
     @ApiResponse(responseCode="401", description="운영자 인증 필요", content=@Content)
     public synchronized ResponseEntity<Void> revoke(@PathVariable UUID id, HttpServletRequest req) throws IOException {
-        media.authorize(req);
+        Grant grant=grants.get(id);
+        if(grant==null) {
+            try {media.authorize(req);} catch(ResponseStatusException e){media.privateTrips.person(req);}
+        } else if(grant.owner()==null) media.authorize(req);
+        else if(!grant.owner().equals(media.privateTrips.person(req))) throw new ResponseStatusException(HttpStatus.NOT_FOUND);
         grants.remove(id);
         return ResponseEntity.noContent().build();
     }
@@ -150,7 +167,7 @@ public class HandoffController {
         String expected = Base64.getUrlEncoder().withoutPadding().encodeToString(grant.secret());
         if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.US_ASCII), code.getBytes(StandardCharsets.US_ASCII)))
             throw new ResponseStatusException(HttpStatus.GONE);
-        Path clip = media.clip(grant.job(), grant.moment());
+        Path clip = grant.savedTrip()==null ? media.clip(grant.job(), grant.moment()) : media.privateTrips.saved(grant.savedTrip(),grant.owner());
         grants.remove(id);
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).contentType(MediaType.valueOf("video/mp4"))
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"DriveLog-" + grant.moment() + ".mp4\"")

@@ -35,7 +35,7 @@ class ProductionMediaApiTest {
     @Test void guideAndPublishedContractCoverTheProtectedFlow() throws Exception {
         assertThat(get("/api/frontend.html",false,false).body()).contains("/api/media/jobs/{id}/edits");
         var doc=JsonMapper.builder().build().readTree(get("/api/v3/api-docs",false,false).body());
-        assertThat(doc.get("paths").propertyNames()).hasSize(13).noneMatch(p->p.contains("/v1/"));
+        assertThat(doc.get("paths").propertyNames()).contains("/api/private-trips/{id}/finalize","/api/library/{id}/clip","/api/library/{tripId}/handoffs").noneMatch(p->p.contains("/v1/"));
         assertThat(get("/api/trips",true,false).statusCode()).isEqualTo(401);
         assertThat(get("/api/trips",false,true).statusCode()).isEqualTo(401);
         assertThat(get("/api/trips",true,true).body()).isEqualTo("[]");

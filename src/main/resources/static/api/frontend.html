@@ -2,9 +2,31 @@
 <style>*{box-sizing:border-box}body{margin:0;background:#f6f8f6;color:#182e28;font:16px/1.65 system-ui,sans-serif}main{max-width:1040px;margin:auto;padding:32px 5vw 64px}header{border-bottom:3px solid #276053}h2{margin-top:2em}a{color:#075b54}nav{display:flex;flex-wrap:wrap;gap:1em}code{overflow-wrap:anywhere}pre{padding:1em;color:#f4faf7;background:#19372f;border-radius:6px;overflow:auto}table{width:100%;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #c3cfc7;text-align:left;vertical-align:top}td:nth-child(2){overflow-wrap:anywhere}small{color:#475e54}</style>
 <main><header><small>DriveLog / 차량 회고 · 프론트엔드 인계</small><h1>대화 추천에서 휴대폰 저장까지</h1>
 <p>운영 기준 주소 <code>https://35.216.33.209</code> · <a href="/api/swagger-ui.html">운영 Swagger</a> · <a href="/api/v3/api-docs">OpenAPI JSON</a>. API 경로는 모두 <code>/api/</code>로 시작한다.</p>
-<nav><a href="#auth">연결</a><a href="#flow">호출 순서</a><a href="#list">전체 명세</a><a href="#state">오류·상태</a><a href="#scope">기획 범위</a></nav></header>
+<nav><a href="#private">개인 운행·동의·보관함</a><a href="#auth">연결</a><a href="#flow">호출 순서</a><a href="#list">전체 명세</a><a href="#state">오류·상태</a><a href="#scope">기획 범위</a></nav></header>
+<section id="private"><h2>개인 운행 시작과 동의</h2>
+<p>팀 BFF는 로그인한 사용자별로 <code>POST /api/accounts</code>를 호출해 반환된 <code>accountId</code>와 <code>accessToken</code>을 서버에서 안전하게 보관한다. 이후에는 같은 자격증명을 사용한다. 사용자 요청의 계정 ID를 그대로 믿지 말고 로그인 세션에 연결한 개인 토큰을 선택한다. Swagger의 Authorize에서 운영자 작업은 operatorToken, 개인 작업은 personToken을 사용한다. 하나의 요청에 Bearer 헤더는 하나다.</p>
+<p>수신 담당자가 해당 운행 원본 폴더를 VM의 <code>/opt/drivelog/media/library/private/inbox/&lt;sourceId UUID&gt;</code>로 인계한다. 폴더에는 trip.json, 전·후방 MP4가 필요하다. 앱 UID 10001이 읽고 이동·삭제할 수 있어야 한다. 관리자는 동일 파일시스템에서 원본 폴더 자체를 이동한다. 기존 팀 데모 운행은 기존 호출 방식으로 사용할 수 있다.</p>
+<pre>POST /api/private-trips      (팀 서버)
+{"sourceId":"수신 UUID","owner":"소유자 계정 UUID","occupants":[
+  {"occupant":"소유자 UUID","under14":false},
+  {"occupant":"아동 UUID","under14":true,"guardian":"지정 보호자 UUID"}]}</pre>
+<p>신뢰된 등록 주체가 현장에서 확인한 좌석 순서·연령 구분·보호자 관계를 연결한다. 운행의 인원수와 연령 구분은 등록된 원본 명세와 일치해야 한다. 보호자 신분 확인은 등록 주체의 절차다. 응답의 tripId는 이후 모든 개인 운행 작업에 사용한다.</p>
+<pre>GET /api/private-trips                            (각 개인)
+GET /api/private-trips/{id}                       (탑승자·지정 보호자)
+PUT /api/private-trips/{id}/consents/{occupant}/PASSENGER  (탑승자 본인)
+PUT /api/private-trips/{id}/consents/{occupant}/GUARDIAN   (지정 보호자)
+{"extraction":true,"geminiTranscript":true}</pre>
+<p>동의 화면에는 원음 전사, 후보 전사문을 Gemini에 보내는 목적, 최종본 저장과 원본 삭제를 표시한다. 성인·아동은 각자 PASSENGER에, 지정 보호자는 아동의 GUARDIAN에 응답한다. 하나라도 거절하거나 철회하면 폐기를 시작한다. 전원이 응답해야 PENDING에서 READY가 된다. 그 뒤 소유자 개인 토큰으로 아래의 <code>POST /api/media/jobs</code>에 개인 tripId를 보내고 편집한다. 미동의 403, 주행 중·도로 검토 미완료 409, 다른 계정의 보관 영상 접근은 404다.</p>
+<h3>편집 확정과 보관함</h3>
+<pre>POST /api/private-trips/{id}/finalize
+{"jobId":"선택한 READY 작업 UUID","moment":"moment-002"}
+GET /api/library                      → 본인의 저장 목록
+GET /api/library/{id}/clip            → 보관 MP4 (Range 지원)
+POST /api/library/{id}/handoffs       → 휴대폰 저장용 일회 QR
+DELETE /api/private-trips/{id}        → 저장 없이 종료 또는 저장본 삭제</pre>
+<p>마지막 편집 결과의 jobId와 카드 id를 보내면 선택한 MP4 한 개를 보관한다. SAVED 응답은 이 운행의 서버 원본 폴더·전사 중간물·이전 편집 버전까지 삭제가 끝났음을 뜻한다. 같은 선택으로 다시 확정할 수 있다. 다른 선택이나 진행 중인 작업이 있으면 409다. 확정 후 미리보기와 QR은 보관함 경로에서 발급한다. DISCARDING은 실행 작업이 종료되기를 기다리는 중이며 DISCARDED가 완료다. 보관함과 동의 기록은 서버 재시작 뒤에도 유지된다. 이미 받은 외부 파일, 차량에 남은 자료, 외부 AI의 데이터 보관은 이 서버의 파기 범위 밖이다.</p></section>
 <h2 id="auth">1. 프론트 연결</h2>
-<p>먼저 <a href="/api/status">배포 상태</a>로 연결을 확인한다. 운행 및 편집 작업은 <strong>팀 작업공간</strong>을 공유한다. FE 서버(BFF)가 팀 사용자 인증 뒤 허용된 메서드와 경로만 프록시하고, <code>Authorization: Bearer &lt;MEDIA_TOKEN&gt;</code>을 주입한다. 토큰은 공개 번들·저장소·쿼리 문자열에 넣지 않는다. 개발자 개인 시험은 HTTPS Swagger의 Authorize를 사용한다. 팀 서버의 운영자가 IAP로 VM의 <code>/opt/drivelog/media.env</code>에서 <code>MEDIA_TOKEN</code> 항목만 받아 비밀 환경변수로 설정한다. Gemini 키는 FE에서 필요 없다.</p>
+<p>먼저 <a href="/api/status">배포 상태</a>로 연결을 확인한다. 합성 운행 demo는 팀 작업공간을 사용한다. FE 서버(BFF)가 팀 사용자 인증 뒤 허용된 메서드와 경로만 프록시하고, <code>Authorization: Bearer &lt;MEDIA_TOKEN&gt;</code>을 주입한다. 토큰은 공개 번들·저장소·쿼리 문자열에 넣지 않는다. 개발자 개인 시험은 HTTPS Swagger의 Authorize를 사용한다. 팀 서버의 운영자가 IAP로 VM의 <code>/opt/drivelog/media.env</code>에서 <code>MEDIA_TOKEN</code> 항목만 받아 비밀 환경변수로 설정한다. Gemini 키는 FE에서 필요 없다.</p>
 <p>Swagger는 같은 출처에서 호출한다. 별도 웹 출처에서는 브라우저가 자체 BFF를 호출한다. 팀 데모는 사전 등록된 합성 운행 <code>demo</code>로 시작한다. QR을 받은 휴대폰에는 팀 토큰이 필요 없다.</p>
 <h2 id="flow">2. 실제 호출 순서</h2>
 <ol><li><code>GET /api/trips</code>에서 ID를 선택하고 추천을 요청한다. <code>202</code>는 등록 성공이다.</li></ol>
@@ -44,4 +66,4 @@ Content-Type: application/json
 <h2 id="state">4. 화면 상태와 복구</h2><p>QUEUED → RUNNING → READY 또는 FAILED. READY여도 <code>NO_SPEECH_CANDIDATE</code>면 인식 발화 없음, <code>NO_MEMORY_CANDIDATE</code>면 선정된 구간 없음이다. 빈 카드를 오류로 표시하지 않는다. FAILED는 재시도 동작을 제공한다. 중복 작업은 같은 입력의 완성본을 재사용할 수 있다.</p>
 <p>400 입력 수정 · 401 서버 토큰과 HTTPS 점검 · 403 탑승자/보호자/전사문 제공 등 해당 동의 확인 · 404 운행·카드·작업 다시 조회 · 409 정차/P단·도로 검토·기준 버전 확인 · 410 QR 재발급 · 416 Range 재요청 · 429 대기열이 비면 재시도 · 507 저장공간 확인. 작업 ID와 QR은 프로세스 메모리에 있어 서버 재시작 후 새 작업 요청이 필요하다. 작업 ID는 최근 최대 64개, 미사용 QR은 최대 128개다.</p>
 <h2 id="scope">5. 기획 범위와 남은 작업</h2><p>현재 서버는 사전 등록한 전·후방 영상과 원음을 읽고 추출 동의·P단·도로 검토를 확인한 뒤 한국어 전사 → Gemini 대화 추천 → 세로 영상·자막 생성 → 편집 → 휴대폰 저장을 처리한다. 글레오는 기획상 역할이고 실제 추천 모델은 Gemini다. 위험 구간 제외와 흐림은 제공된 구간표 기준이다.</p>
-<p>실차 카메라 자동 수신·실제 탑승자 신원/동의 수집·자동 얼굴/번호판 검출·제품 원본 파기·개인별 보관함·SNS 작성기는 별도 과제다. 이 팀 작업공간에 실제 승객 음성이나 영상을 등록하지 않는다. QR 다운로드는 인스타그램이나 카카오톡 게시를 의미하지 않는다.</p></main></html>
+<p>실차 카메라 자동 수신·실차 탑승자 신원 및 법정대리인 관계 확인·자동 얼굴/번호판 검출·차량·외부 서비스의 파기 확인·SNS 작성기는 별도 과제다. 이 팀 작업공간에 실제 승객 음성이나 영상을 등록하지 않는다. QR 다운로드는 인스타그램이나 카카오톡 게시를 의미하지 않는다.</p></main></html>

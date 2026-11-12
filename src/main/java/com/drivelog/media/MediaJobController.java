@@ -30,6 +30,7 @@ import tools.jackson.databind.json.JsonMapper;
 @RequestMapping("/api/media/jobs")
 @Tag(name="정차 후 미디어 작업")
 @SecurityRequirement(name="operatorToken")
+@SecurityRequirement(name="personToken")
 @ApiResponse(responseCode="401", description="HTTPS 팀 서버 Bearer 인증 필요", content=@Content)
 @ApiResponse(responseCode="403", description="탑승자·보호자 또는 분석 동의 누락", content=@Content)
 @ApiResponse(responseCode="409", description="정차 조건 또는 도로 검토 상태 확인 필요", content=@Content)
@@ -46,13 +47,15 @@ public class MediaJobController {
             new ArrayBlockingQueue<>(4), new ThreadPoolExecutor.AbortPolicy());
     private final JsonMapper json = JsonMapper.builder().build();
     private final Path trips, library, script;
+    final PrivateTrips privateTrips;
     private final String python;
     private final byte[] secret;
 
     public MediaJobController(@Value("${media.trips}") Path trips, @Value("${media.library}") Path library,
             @Value("${media.worker}") Path script, @Value("${media.python:python}") String python,
-            @Value("${media.token}") String token) throws IOException {
+            @Value("${media.token}") String token, PrivateTrips privateTrips) throws IOException {
         if (token.length() < 32) throw new IllegalArgumentException("media.token requires 32 or more characters");
+        this.privateTrips=privateTrips;
         this.secret = token.getBytes(StandardCharsets.UTF_8);
         this.trips = trips.toRealPath();
         this.library = Files.createDirectories(library).toRealPath();
@@ -96,16 +99,21 @@ public class MediaJobController {
     @ApiResponse(responseCode="400", description="운행·프로필·편집 조합 오류", content=@Content)
     @ApiResponse(responseCode="404", description="운행 또는 기준 카드 없음", content=@Content)
     @ApiResponse(responseCode="429", description="실행 1건·대기 4건이 모두 사용 중", content=@Content)
-    public synchronized ResponseEntity<?> submit(@RequestBody Request input, HttpServletRequest req) throws IOException {
-        authorize(req);
+    public ResponseEntity<?> submit(@RequestBody Request input, HttpServletRequest req) throws IOException {
+        synchronized(privateTrips) { return registerJob(input,req); }
+    }
+
+    private ResponseEntity<?> registerJob(Request input,HttpServletRequest req) throws IOException {
+        boolean personal=PrivateTrips.managed(input.tripId());
+        if(!personal) authorize(req);
         if (input.tripId() == null || !input.tripId().matches("[A-Za-z0-9_-]{1,80}") ||
                 !("STORY_15".equals(input.profile()) || "SHORT_30".equals(input.profile())))
             throw error(HttpStatus.BAD_REQUEST);
         if (input.edit()!=null && ((input.edit().title()!=null && (input.edit().title().isBlank() || input.edit().title().length()>80))
                 || (input.edit().captions()!=null && (input.edit().captions().size()>100 || input.edit().captions().stream().anyMatch(t -> t==null || t.length()>200))))) throw error(HttpStatus.BAD_REQUEST);
         if (Files.getFileStore(library).getUsableSpace()<2_000_000_000L) throw error(HttpStatus.INSUFFICIENT_STORAGE);
-        Path file = trips.resolve(input.tripId()).resolve("trip.json");
-        if (!Files.isRegularFile(file) || !file.toRealPath().startsWith(trips)) throw error(HttpStatus.NOT_FOUND);
+        Path file = personal ? privateTrips.input(input.tripId(),privateTrips.person(req)) : trips.resolve(input.tripId()).resolve("trip.json");
+        if (!Files.isRegularFile(file) || (!personal && !file.toRealPath().startsWith(trips))) throw error(HttpStatus.NOT_FOUND);
         JsonNode manifest = json.readTree(file.toFile());
         if (!input.tripId().equals(manifest.path("tripId").asText())) throw error(HttpStatus.CONFLICT);
         consent(file);
@@ -127,20 +135,24 @@ public class MediaJobController {
             jobs.put(id,job);
         }
         String revision = baseVersion;
+        if(personal) privateTrips.started(job.tripId());
         try { runner.execute(() -> process(job,input.edit(),revision)); }
-        catch (RejectedExecutionException e) { jobs.remove(id); throw error(HttpStatus.TOO_MANY_REQUESTS); }
+        catch (RejectedExecutionException e) { if(personal) privateTrips.stopped(job.tripId()); jobs.remove(id); throw error(HttpStatus.TOO_MANY_REQUESTS); }
         return ResponseEntity.accepted().cacheControl(CacheControl.noStore()).body(Map.of("jobId",id));
     }
 
     private void process(Job job, Edit edit, String baseVersion) {
         Path editPath = null;
         Process process = null;
+        Path completed=null;
         try {
+            Path outputRoot=PrivateTrips.managed(job.tripId())?privateTrips.work(job.tripId()):library;
+            consent(job.manifest());
             update(job,"RUNNING",null);
             List<String> command = new ArrayList<>(List.of(python,script.toString(),job.manifest().toString(),
-                    library.toString(),"--profile",job.profile()));
+                    outputRoot.toString(),"--profile",job.profile()));
             if (edit != null) {
-                editPath = Files.createTempFile(library,"edit-",".json");
+                editPath = Files.createTempFile(outputRoot,"edit-",".json");
                 var data = json.valueToTree(edit).deepCopy();
                 var obj = (tools.jackson.databind.node.ObjectNode)data;
                 for (String key : List.of("startMs","endMs","title","captions")) if (obj.path(key).isNull()) obj.remove(key);
@@ -151,11 +163,11 @@ public class MediaJobController {
             process = new ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.DISCARD).start();
             if (!process.waitFor(60,TimeUnit.MINUTES) || process.exitValue()!=0) throw new IOException("Worker failed");
             String result = new String(process.getInputStream().readNBytes(4096), StandardCharsets.UTF_8).strip();
-            Path output = library.resolve(result).toRealPath();
-            if (!library.equals(output.getParent()) || !Files.isRegularFile(output.resolve("cards.json")))
+            Path output = outputRoot.resolve(result).toRealPath();
+            if (!outputRoot.equals(output.getParent()) || !Files.isRegularFile(output.resolve("cards.json")))
                 throw new IOException("Invalid worker output");
             consent(job.manifest());
-            update(job,"READY",output);
+            completed=output;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt(); update(job,"FAILED",null);
         } catch (Exception e) { update(job,"FAILED",null); }
@@ -164,6 +176,11 @@ public class MediaJobController {
                 process.descendants().forEach(ProcessHandle::destroyForcibly); process.destroyForcibly();
             }
             if (editPath!=null) try { Files.deleteIfExists(editPath); } catch (IOException ignored) {}
+            synchronized(privateTrips) {
+                if(PrivateTrips.managed(job.tripId())) try { privateTrips.stopped(job.tripId()); }
+                catch(IOException e) { org.slf4j.LoggerFactory.getLogger(getClass()).error("Pending trip cleanup",e); }
+                if(completed!=null) update(job,"READY",completed);
+            }
         }
     }
 
@@ -193,9 +210,9 @@ public class MediaJobController {
         return node.path(key).isBoolean() && node.path(key).asBoolean();
     }
     Job owned(UUID id,HttpServletRequest req) throws IOException {
-        authorize(req);
         Job job=jobs.get(id);
         if (job==null) throw error(HttpStatus.NOT_FOUND);
+        if(PrivateTrips.managed(job.tripId())) privateTrips.input(job.tripId(),privateTrips.person(req)); else authorize(req);
         validateJobAccess(job);
         return job;
     }
