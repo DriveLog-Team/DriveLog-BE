@@ -10,6 +10,7 @@ mvn spring-boot:run
 ```
 
 - 상태: `GET /api/status`
+- 운영 Swagger: `/api/swagger-ui.html` · OpenAPI: `/api/v3/api-docs`
 - 헬스 체크: `GET /actuator/health`
 
 ## 배포

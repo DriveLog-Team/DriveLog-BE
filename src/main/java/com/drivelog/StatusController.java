@@ -14,6 +14,7 @@ public class StatusController {
     }
 
     @GetMapping("/api/status")
+    @io.swagger.v3.oas.annotations.Operation(operationId="getDeploymentStatus", tags="서버 상태",summary="현재 서비스와 배포 버전 확인")
     public Map<String, String> status() {
         return Map.of("service", "drivelog-api", "status", "ready", "release", release);
     }
