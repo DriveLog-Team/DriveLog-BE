@@ -22,7 +22,7 @@ def reviewed_intervals(spec):
     if review.get("complete") is not True:
         raise ValueError("Road footage review is pending")
     for name in ("nearPedestrian", "blur"):
-        intervals = review.get(name)
+        intervals = review.get(name, [])
         if not isinstance(intervals, list):
             raise ValueError("Expected reviewed intervals for both road cameras")
         for pair in intervals:

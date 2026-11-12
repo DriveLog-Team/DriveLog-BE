@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import wave
 import gemini_demo
+import road_privacy
 from file_hash import digest
 from extraction_policy import require_extraction, reviewed_intervals, overlapping
 from semantic_ranker import MemoryRanker, REVISION
@@ -63,14 +64,16 @@ def intervals(duration, silence_log):
     return spans
 
 
-def transcribe(audio, wd, source_offset, manifest_path):
+def transcribe(audio, wd, source_offset, manifest_path, blocked=()):
     with wave.open(str(audio), "rb") as wav:
         duration = round(1000 * wav.getnframes() / wav.getframerate())
     silence = ff(*input_args(audio), "-af", "silencedetect=noise=-38dB:d=2.0", "-f", "null", "-")
     cues = []
     exe = os.environ.get("WHISPER_CLI", "whisper-cli")
     model = os.environ["WHISPER_MODEL"]
-    for group, (start, end) in enumerate(intervals(duration, silence)):
+    safe = [(a-source_offset,b-source_offset) for s,e in intervals(duration,silence)
+            for a,b in road_privacy.safe_parts(source_offset+s,source_offset+e,blocked) if b-a >= 500]
+    for group, (start, end) in enumerate(safe):
         require_audio_consent(manifest_path)
         chunk = wd / "speech.wav"
         ff("-ss", start / 1000, *input_args(audio), "-t", (end-start)/1000, "-c:a", "pcm_s16le", chunk)
@@ -159,7 +162,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
                                     for a,b,s,t in events), encoding="utf-8-sig")
 
 
-def render(card, tracks, audio_name, wd, dest, blur_intervals=()):
+def render(card, tracks, audio_name, wd, dest, blur_intervals=(), masks=()):
     start, end = card["startMs"], card["endMs"]
     duration = (end-start)/1000
     args, filters = [], []
@@ -181,7 +184,16 @@ def render(card, tracks, audio_name, wd, dest, blur_intervals=()):
         begin = (a - card["startMs"]) / 1000
         end = (b - card["startMs"]) / 1000
         effects.append(f"gblur=sigma=36:enable='between(t,{begin},{end})'")
-    filters.append("[p0][p1]" + ",".join(effects + ["ass=captions.ass"]) + "[video]")
+    filters.append("[p0][p1]" + ",".join(effects) + "[road]")
+    if road_privacy.write_mask(wd/"alpha.gray", card, masks):
+        args += ["-f","rawvideo","-pixel_format","gray","-video_size","216x384","-framerate","25","-i",wd/"alpha.gray"]
+        filters.extend(["[road]split[clean][copy]", "[copy]gblur=sigma=48[blurred]",
+                        "[3:v]scale=1080:1920:flags=neighbor,format=gray[alpha]",
+                        "[blurred][alpha]alphamerge[protected]", "[clean][protected]overlay[composite]"])
+        video = "[composite]"
+    else:
+        video = "[road]"
+    filters.append(video+"ass=captions.ass[video]")
     ff("-loglevel","error",*args,"-filter_complex_threads","1","-filter_complex",";".join(filters),
        "-map","[video]","-map","2:a:0","-t",duration,"-map_metadata","-1","-c:v","libx264",
        "-preset","veryfast","-threads","2","-pix_fmt","yuv420p","-c:a","aac","-movflags","+faststart",dest,cwd=wd)
@@ -236,7 +248,7 @@ def run(manifest, library, profile, edit_file=None):
     edit = read_json(edit_file) if edit_file else None
     # Source generation and ASR identity define a reusable private transcript.
     hashes = {name:digest(track["path"]) for name,track in tracks.items()}
-    source_key = [spec["tripId"],audio_name,primary["offsetMs"],hashes[audio_name],
+    source_key = [road_privacy.POLICY, spec["tripId"],audio_name, {k:t["offsetMs"] for k,t in tracks.items()},hashes,road_review,
                   digest(Path(os.environ["WHISPER_MODEL"])), "whisper-ko-silence-v2"]
     key = hashlib.sha256(json.dumps(source_key).encode()).hexdigest()
     cache = library / ("transcript-"+key+".json")
@@ -261,6 +273,7 @@ def run(manifest, library, profile, edit_file=None):
         return target
     with tempfile.TemporaryDirectory(dir=library) as temp:
         wd = Path(temp)
+        masks, blocked, privacy = road_privacy.scan(tracks, road_review, lambda: require_audio_consent(manifest))
         cues = []
         if edit is not None:
             base = edit.get("baseVersion","")
@@ -278,34 +291,36 @@ def run(manifest, library, profile, edit_file=None):
                 cues = read_json(cache)
             else:
                 ff("-loglevel","error",*input_args(primary["path"]),"-map","0:a:0","-vn","-ar","16000","-ac","1","-c:a","pcm_s16le",wav)
-                cues = transcribe(wav,wd,primary["offsetMs"],manifest)
+                cues = transcribe(wav,wd,primary["offsetMs"],manifest,blocked)
                 require_audio_consent(manifest)
                 if mode == "local":
                     draft = wd/"transcript.json"
                     write_json(draft,cues)
                     os.replace(draft,cache)
             cards = make_cards(cues,limit)
-            cards = [card for card in cards if not overlapping(card["startMs"], card["endMs"], road_review["nearPedestrian"])]
+            cards = [card for card in cards if not overlapping(card["startMs"], card["endMs"], blocked)]
             require_audio_consent(manifest)
             if mode == "gleo-demo":
-                selected = gemini_demo.select(cards, authorize_gemini)
+                selected = gemini_demo.select(cards, authorize_gemini) if cards else []
                 authorize_gemini()
                 with wave.open(str(wav), "rb") as raw:
                     source_start = primary["offsetMs"]
                     source_end = source_start + (1000 * raw.getnframes()) // raw.getframerate()
                 for card in selected:
-                    add_surrounding_footage(card, cues, source_start, source_end, road_review["nearPedestrian"], limit)
+                    add_surrounding_footage(card, cues, source_start, source_end, blocked, limit)
             else:
                 selected = MemoryRanker().select(cards) if cards else []
         staging = wd/"release"
         staging.mkdir()
         for card in selected:
             require_audio_consent(manifest)
+            if overlapping(card["startMs"],card["endMs"],blocked):
+                raise ValueError("Edit overlaps excluded road footage")
             card["file"] = card["id"]+".mp4"
-            render(card,tracks,audio_name,wd,staging/card["file"],road_review["blur"])
+            render(card,tracks,audio_name,wd,staging/card["file"],road_review.get("blur", []), masks)
         write_json(staging/"cards.json",dict(tripId=spec["tripId"],profile=profile,version=version,sourceRevision=source_revision,
                    status="READY" if selected else ("NO_MEMORY_CANDIDATE" if cues else "NO_SPEECH_CANDIDATE"),
-                   cards=selected))
+                   cards=selected,privacy=privacy))
         require_audio_consent(manifest)
         if read_json(manifest).get("roadReview") != road_review:
             raise ValueError("Road footage review changed during processing")

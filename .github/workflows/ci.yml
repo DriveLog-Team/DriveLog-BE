@@ -25,5 +25,6 @@ jobs:
           docker build -t drivelog-ci .
           docker run --rm --entrypoint /bin/sh drivelog-ci -ec 'whisper-cli --help && ffmpeg -version && python3 /app/media/worker.py --help'
           docker run --rm --entrypoint python3 drivelog-ci -m unittest discover -s /app/media -p 'test_*.py'
+          docker run --rm --workdir /app/media --entrypoint python3 drivelog-ci -c 'import numpy as np, road_privacy as r; assert not r.Detector()(np.zeros((r.H,r.W,3),np.uint8))'
       - name: Validate deployment trust boundary
         run: python3 -m unittest discover -s deploy -p 'test_*.py' -v
