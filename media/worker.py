@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import wave
 import gemini_demo
+from file_hash import digest
 from extraction_policy import require_extraction, reviewed_intervals, overlapping
 from semantic_ranker import MemoryRanker, REVISION
 
@@ -213,11 +214,6 @@ def apply_edit(cards, edit, limit):
             reason.update(quote=evidence["text"], quoteStartMs=evidence["startMs"], quoteEndMs=evidence["endMs"])
         else:
             card.pop("recommendation")
-
-
-def digest(path):
-    with path.open("rb") as s:
-        return hashlib.file_digest(s,"sha256").hexdigest()
 
 
 def run(manifest, library, profile, edit_file=None):

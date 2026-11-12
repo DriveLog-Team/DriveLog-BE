@@ -1,4 +1,7 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from file_hash import digest
 from worker import intervals, make_cards, apply_edit, plain
 
 
@@ -7,6 +10,12 @@ def cue(group, start, end, text):
 
 
 class ConversationTest(unittest.TestCase):
+    def test_source_hash_in_runtime_image(self):
+        with TemporaryDirectory() as root:
+            source = Path(root, "input")
+            source.write_bytes(b"abc")
+            self.assertEqual(digest(source), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
     def test_silence_including_trailing_silence(self):
         self.assertEqual(intervals(4000, "silence_start: 0\nsilence_end: 4"), [])
         self.assertEqual(intervals(10000, "silence_start: 2\nsilence_end: 5\nsilence_start: 9"),
