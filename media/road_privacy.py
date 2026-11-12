@@ -65,12 +65,33 @@ class Detector:
         return hits
 
 
-def scan(tracks, manual, authorize):
+class MaskStore:
+    """Index long recordings on disk; render queries only the chosen seconds."""
+    def __init__(self,path):
+        import sqlite3
+        self.db=sqlite3.connect(path)
+        self.db.execute("CREATE TABLE mask(a INTEGER,b INTEGER,cam INTEGER,x REAL,y REAL,r REAL,v REAL)")
+        self.db.execute("CREATE INDEX mask_start ON mask(a)")
+
+    def append(self,mask):
+        self.db.execute("INSERT INTO mask VALUES (?,?,?,?,?,?,?)",mask)
+
+    def window(self,start,end):
+        # Every detection gets a fixed 600 ms temporal margin including its sample.
+        return self.db.execute("SELECT * FROM mask WHERE a>=? AND a<? AND b>?",(start-600,end,start))
+
+    def close(self):
+        self.db.close()
+
+
+def scan(tracks, manual, authorize, masks=None):
     import numpy as np
     detector = Detector()
-    masks, auto, cameras = [], [], {}
+    masks = [] if masks is None else masks
+    auto, cameras = [], {}
     for index, key in enumerate(("front", "rear")):
         track = tracks[key]
+        auto_track=[]
         offset = track["offsetMs"]
         stats = dict(samples=0, faceHits=0, plateHits=0, nearHits=0)
         cameras[key] = stats
@@ -97,7 +118,11 @@ def scan(tracks, manual, authorize):
                         if kind == "person":
                             if (b-y >= .36 or (b-y >= .22 and b >= .72)):
                                 stats["nearHits"] += 1
-                                auto.append([max(0,at-600), at+STEP+600])
+                                lo,hi=max(0,at-600),at+STEP+600
+                                if auto_track and lo<=auto_track[-1][1]:
+                                    auto_track[-1][1]=hi
+                                else:
+                                    auto_track.append([lo,hi])
                         else:
                             stats[kind+"Hits"] += 1
                             dx, dy = max(.025,(r-x)*.35), max(.025,(b-y)*.35)
@@ -108,6 +133,7 @@ def scan(tracks, manual, authorize):
             finally:
                 if proc.poll() is None:
                     proc.kill()
+        auto.extend(auto_track)
     blocked = merge(auto + manual.get("nearPedestrian", []))
     report = dict(policy=POLICY, sampleStepMs=STEP, cameras=cameras,
                   excluded=[dict(startMs=a, endMs=b) for a,b in blocked])
@@ -117,7 +143,7 @@ def scan(tracks, manual, authorize):
 def write_mask(path, card, masks):
     import numpy as np
     start, end = card["startMs"], card["endMs"]
-    relevant = [m for m in masks if m[0] < end and m[1] > start]
+    relevant = list(masks.window(start,end)) if isinstance(masks,MaskStore) else [m for m in masks if m[0] < end and m[1] > start]
     if not relevant:
         return False
     with path.open("wb") as output:

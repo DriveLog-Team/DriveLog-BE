@@ -3,6 +3,7 @@ package com.drivelog.media;
 import jakarta.annotation.PostConstruct;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.*;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
@@ -19,15 +20,22 @@ import static org.springframework.http.HttpStatus.*;
 import static java.nio.file.StandardCopyOption.*;
 
 /** Single VM store. One atomic manifest governs both the HTTP API and the media worker. */
+@org.springframework.scheduling.annotation.EnableScheduling
 @Service
 @Profile("media")
 class PrivateTrips {
     record Account(UUID accountId, String accessToken) {}
     record Seat(UUID occupant, boolean under14, UUID guardian) {}
-    record Registration(UUID sourceId, UUID owner, List<Seat> occupants) {}
+    record Registration(UUID sourceId, UUID owner, List<Seat> occupants, Source source) {}
+    record Source(String gear, boolean stationary, String audioSource, long frontOffsetMs, long rearOffsetMs, boolean roadReviewed) {}
     enum Role { PASSENGER, GUARDIAN }
-    record Decision(Boolean extraction, Boolean geminiTranscript) {}
-    record Receipt(Role role, UUID occupant, UUID actor, boolean extraction, boolean geminiTranscript, String at) {}
+    record Decision(Boolean extraction, Boolean geminiTranscript, Boolean useTripContext) {
+        Decision(Boolean extraction, Boolean geminiTranscript){this(extraction,geminiTranscript,false);}
+    }
+    enum EventKind { LANDMARK, NEAR_ARRIVAL, ARRIVAL }
+    record DriveEvent(long atMs, EventKind kind, String label) {}
+    record DriveContext(String departure,String destination,List<DriveEvent> events) {}
+    record Receipt(Role role, UUID occupant, UUID actor, boolean extraction, boolean geminiTranscript, boolean useTripContext, String at) {}
     record Trip(String tripId, UUID owner, String phase, List<Seat> occupants, List<Receipt> receipts) {}
     record Selection(UUID jobId, String moment) {}
     record Item(String tripId, String title, long durationMs, String savedAt) {}
@@ -49,6 +57,8 @@ class PrivateTrips {
                 if (!Files.isRegularFile(entry.resolve("trip.json"))) continue;
                 ObjectNode doc=read(entry.getFileName().toString());
                 if ("IMPORTING".equals(phase(doc))) finishImport(doc);
+                if(!access(doc).has("draftVersion") && Set.of("READY","UPLOAD","PENDING").contains(phase(doc))) deleteTree(entry.resolve("work"));
+                if(access(doc).has("draftVersion")) deleteTree(entry.resolve("raw"));
                 cleanup(doc);
             }
         }
@@ -113,42 +123,85 @@ class PrivateTrips {
         if(Files.isRegularFile(folder.resolve("trip.json"))) {
             ObjectNode prior=read(id);
             if(!reg.owner().toString().equals(access(prior).path("owner").asText()) || !access(prior).get("seats").equals(json.valueToTree(reg.occupants()))) throw new ResponseStatusException(CONFLICT);
+            if(access(prior).has("source") && !access(prior).get("source").equals(json.valueToTree(reg.source()))) throw new ResponseStatusException(CONFLICT);
             if("IMPORTING".equals(phase(prior))) finishImport(prior);
             return view(prior);
         }
-        Path src=inbox.resolve(reg.sourceId().toString());
-        if(!Files.isDirectory(src,LinkOption.NOFOLLOW_LINKS) || !Files.isRegularFile(src.resolve("trip.json"),LinkOption.NOFOLLOW_LINKS)) throw new ResponseStatusException(NOT_FOUND);
-        ObjectNode input=(ObjectNode)json.readTree(src.resolve("trip.json").toFile());
+        Source source=reg.source();
+        if(source==null || !"P".equals(source.gear()) || !source.stationary() || !source.roadReviewed()
+                || !List.of("front","rear").contains(Objects.toString(source.audioSource(),""))
+                || source.frontOffsetMs()<0 || source.rearOffsetMs()<0) throw new ResponseStatusException(BAD_REQUEST);
         ObjectNode doc=json.createObjectNode(); doc.put("tripId",id);
-        for(String side:List.of("front","rear")) {
-            JsonNode track=input.path(side);
-            String name=track.path("file").asText();
-            if(!name.matches("[A-Za-z0-9_-][A-Za-z0-9_.-]{0,100}\\.mp4") || !Files.isRegularFile(src.resolve(name),LinkOption.NOFOLLOW_LINKS)
-                || !track.path("offsetMs").isIntegralNumber() || track.path("offsetMs").asLong()<0) throw new ResponseStatusException(BAD_REQUEST);
-            doc.putObject(side).put("file","raw/"+name).put("offsetMs",track.path("offsetMs").asLong());
-        }
-        if(!Set.of("front","rear").contains(input.path("audioSource").asText()) || !input.path("roadReview").isObject()) throw new ResponseStatusException(BAD_REQUEST);
-        if(!input.path("extraction").path("occupantCount").isIntegralNumber() || input.path("extraction").path("occupantCount").asInt()!=people.size()) throw new ResponseStatusException(CONFLICT);
-        JsonNode trustedSeats=input.path("extraction").path("occupants");
-        if(!trustedSeats.isArray() || trustedSeats.size()!=people.size()) throw new ResponseStatusException(CONFLICT);
-        for(int i=0;i<trustedSeats.size();i++) {
-            String expected=reg.occupants().get(i).under14()?"under14":"14plus";
-            if(!expected.equals(trustedSeats.get(i).path("ageBand").asText())) throw new ResponseStatusException(CONFLICT);
-        }
-        doc.put("audioSource",input.get("audioSource").asText()).put("recommendationMode","gleo-demo").put("gleoExcerptConsent",false);
-        doc.set("roadReview",input.get("roadReview"));
-        doc.putObject("extraction").put("gear",input.path("extraction").path("gear").asText())
-            .put("stationary",input.path("extraction").path("stationary").isBoolean() && input.path("extraction").path("stationary").booleanValue()).put("occupantCount",people.size());
-        ObjectNode a=doc.putObject("access");a.put("owner",reg.owner().toString()).put("phase","IMPORTING");
+        doc.putObject("front").put("file","raw/front.mp4").put("offsetMs",source.frontOffsetMs());
+        doc.putObject("rear").put("file","raw/rear.mp4").put("offsetMs",source.rearOffsetMs());
+        doc.put("audioSource",source.audioSource()).put("recommendationMode","gleo-demo").put("gleoExcerptConsent",false);
+        doc.putObject("roadReview").put("complete",true);
+        doc.putObject("extraction").put("gear","P").put("stationary",true).put("occupantCount",people.size());
+        ObjectNode a=doc.putObject("access");a.put("owner",reg.owner().toString()).put("phase","PENDING");
+        a.put("expiresAt",Instant.now().plusSeconds(86400).toString());
+        a.set("source",json.valueToTree(source));
+        a.putObject("uploads");
         a.set("seats",json.valueToTree(reg.occupants()));a.putObject("receipts");
         refresh(doc);
-        Files.createDirectories(folder);store(doc);finishImport(doc);
+        Files.createDirectories(folder);store(doc);
         return view(doc);
     }
     private void finishImport(ObjectNode doc) throws IOException {
         String id=doc.get("tripId").asText();Path raw=dir(id).resolve("raw");
         if(!Files.exists(raw)) Files.move(inbox.resolve(id.substring(5)),raw,ATOMIC_MOVE);
         access(doc).put("phase","PENDING");store(doc);
+    }
+    private ObjectNode uploadAllowed(String id, UUID actor, String side, String digest) throws IOException {
+        owner(id,actor);
+        if(!Set.of("front","rear").contains(side) || digest==null || !digest.matches("[a-f0-9]{64}"))
+            throw new ResponseStatusException(BAD_REQUEST);
+        ObjectNode doc=read(id);
+        if(!access(doc).has("uploads") || !doc.path("audioProcessingConsent").asBoolean()
+                || !Set.of("UPLOAD","READY").contains(phase(doc))) throw new ResponseStatusException(FORBIDDEN);
+        return doc;
+    }
+    Trip upload(String id, UUID actor, String side, String digest, long length, InputStream bytes) throws IOException {
+        long limit=8L*1024*1024*1024;
+        Path raw=dir(id).resolve("raw"), temp;
+        synchronized(this) {
+            ObjectNode doc=uploadAllowed(id,actor,side,digest);
+            String prior=access(doc).get("uploads").path(side).asText("");
+            if(!prior.isEmpty()) {
+                if(!prior.equals(digest)) throw new ResponseStatusException(CONFLICT);
+                return view(doc);
+            }
+            if(length<=0 || length>limit) throw new ResponseStatusException(BAD_REQUEST);
+            Files.createDirectories(raw);
+            if(Files.getFileStore(raw).getUsableSpace()-length<2_000_000_000L) throw new ResponseStatusException(INSUFFICIENT_STORAGE);
+            temp=Files.createTempFile(raw,"upload-",".part");
+            started(id);
+        }
+        try {
+            MessageDigest sha;
+            try {sha=MessageDigest.getInstance("SHA-256");} catch(NoSuchAlgorithmException e){throw new IllegalStateException(e);}
+            long total=0;
+            try(var output=Files.newOutputStream(temp,StandardOpenOption.WRITE)) {
+                byte[] buffer=new byte[256*1024];
+                for(int n;(n=bytes.read(buffer))!=-1;) {
+                    total+=n;
+                    if(total>length) throw new ResponseStatusException(BAD_REQUEST);
+                    synchronized(this){uploadAllowed(id,actor,side,digest);}
+                    sha.update(buffer,0,n);output.write(buffer,0,n);
+                }
+            }
+            if(total!=length || !HexFormat.of().formatHex(sha.digest()).equals(digest)) throw new ResponseStatusException(BAD_REQUEST);
+            synchronized(this) {
+                ObjectNode doc=uploadAllowed(id,actor,side,digest);
+                var uploads=(ObjectNode)access(doc).get("uploads");
+                if(uploads.has(side) && !digest.equals(uploads.path(side).asText())) throw new ResponseStatusException(CONFLICT);
+                Files.move(temp,raw.resolve(side+".mp4"),ATOMIC_MOVE,REPLACE_EXISTING);
+                uploads.put(side,digest);
+                if(uploads.has("front") && uploads.has("rear")) access(doc).put("phase","READY");
+                store(doc);return view(doc);
+            }
+        } finally {
+            try {Files.deleteIfExists(temp);} finally {stopped(id);}
+        }
     }
     private List<Seat> seats(ObjectNode doc) {
         return Arrays.asList(json.treeToValue(access(doc).get("seats"),Seat[].class));
@@ -192,13 +245,42 @@ class PrivateTrips {
         if(d==null || d.extraction()==null || d.geminiTranscript()==null) throw new ResponseStatusException(BAD_REQUEST);
         boolean yes=d.extraction() && d.geminiTranscript();
         if("DISCARDED".equals(phase(doc)) && !yes) return view(doc);
-        if(!Set.of("PENDING","READY","SAVED").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
+        if(!Set.of("PENDING","UPLOAD","READY","SAVED").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
         var receipts=(ObjectNode)access(doc).get("receipts");String key=occupant+"/"+role;
-        if(yes && agreed(receipts.path(key))) return view(doc);
-        receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),Instant.now().toString())));
+        boolean context=Boolean.TRUE.equals(d.useTripContext());
+        if(yes && agreed(receipts.path(key))) {
+            if(receipts.path(key).path("useTripContext").asBoolean()==context) return view(doc);
+            if(!context && access(doc).path("usedContext").asBoolean()) {
+                receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),false,Instant.now().toString())));
+                return discardContext(doc);
+            }
+            if(!Set.of("PENDING","UPLOAD").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
+        }
+        receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),context,Instant.now().toString())));
         boolean all=refresh(doc);
-        access(doc).put("phase",yes?(all?"READY":"PENDING"):"DISCARDING");
+        access(doc).put("phase",yes?(all?(access(doc).has("uploads") && access(doc).get("uploads").size()<2?"UPLOAD":"READY"):"PENDING"):"DISCARDING");
         store(doc);cleanup(doc);return view(doc);
+    }
+    private Trip discardContext(ObjectNode doc) throws IOException {
+        access(doc).put("phase","DISCARDING");
+        doc.put("audioProcessingConsent",false).put("geminiTranscriptConsent",false);
+        store(doc);cleanup(doc);return view(doc);
+    }
+    private boolean validLabel(String label) {
+        return label==null || (label.length()<=64 && label.codePoints().noneMatch(Character::isISOControl));
+    }
+    synchronized Trip attachContext(String id,UUID actor,DriveContext context) throws IOException {
+        owner(id,actor);ObjectNode doc=read(id);
+        if(!"UPLOAD".equals(phase(doc))) throw new ResponseStatusException(CONFLICT);
+        for(JsonNode receipt:access(doc).get("receipts"))
+            if(!receipt.path("useTripContext").asBoolean()) throw new ResponseStatusException(FORBIDDEN);
+        if(context==null || !validLabel(context.departure()) || !validLabel(context.destination())
+                || context.events()==null || context.events().size()>128) throw new ResponseStatusException(BAD_REQUEST);
+        for(DriveEvent event:context.events()) {
+            if(event==null || event.atMs()<0 || event.kind()==null || !validLabel(event.label())) throw new ResponseStatusException(BAD_REQUEST);
+        }
+        doc.set("driveContext",json.valueToTree(context));access(doc).put("usedContext",true);
+        store(doc);return view(doc);
     }
     synchronized void owner(String id, UUID person) throws IOException {
         if(!access(read(id)).path("owner").asText().equals(person.toString())) throw new ResponseStatusException(NOT_FOUND);
@@ -206,11 +288,43 @@ class PrivateTrips {
     synchronized Path input(String id,UUID actor) throws IOException {
         owner(id,actor);
         String phase=phase(read(id));
+        if("UPLOAD".equals(phase)) throw new ResponseStatusException(CONFLICT);
         if("PENDING".equals(phase)) throw new ResponseStatusException(FORBIDDEN);
         if(!"READY".equals(phase)) throw new ResponseStatusException(GONE);
         return dir(id).resolve("trip.json");
     }
     synchronized Path work(String id) throws IOException {return Files.createDirectories(dir(id).resolve("work"));}
+    synchronized void protectDraft(String id,Path export) throws IOException {
+        ObjectNode doc=read(id);
+        if(!"READY".equals(phase(doc))) throw new ResponseStatusException(CONFLICT);
+        if(!access(doc).has("draftVersion")) {
+            JsonNode result=json.readTree(export.resolve("cards.json").toFile());
+            for(JsonNode card:result.path("cards")) {
+                if(!Files.isRegularFile(export.resolve("master-"+card.path("file").asText()))) throw new IOException("Protected clip missing");
+            }
+            access(doc).put("draftVersion",export.getFileName().toString());
+            doc.remove("driveContext");
+            access(doc).put("expiresAt",Instant.now().plusSeconds(86400).toString());
+            store(doc);
+        }
+        deleteTree(dir(id).resolve("raw"));
+    }
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelay=60000)
+    synchronized void expireAbandoned() throws IOException {
+        try(var entries=Files.list(trips)) {
+            for(Path entry:entries.toList()) {
+                if(!Files.isRegularFile(entry.resolve("trip.json"))) continue;
+                ObjectNode doc=read(entry.getFileName().toString());
+                if(Set.of("PENDING","UPLOAD","READY").contains(phase(doc)) && access(doc).has("expiresAt")
+                        && !Instant.parse(access(doc).get("expiresAt").asText()).isAfter(Instant.now())) {
+                    access(doc).put("phase","DISCARDING");
+                    doc.put("audioProcessingConsent",false).put("geminiTranscriptConsent",false);
+                    store(doc);
+                }
+                cleanup(doc);
+            }
+        }
+    }
     synchronized void started(String id){workers.merge(id,1,Integer::sum);}
     synchronized void stopped(String id) throws IOException {
         workers.computeIfPresent(id,(k,n)->n==1?null:n-1);cleanup(read(id));
@@ -249,6 +363,7 @@ class PrivateTrips {
         if(workers.containsKey(id) || !Set.of("SAVING","DISCARDING").contains(phase)) return;
         Path folder=dir(id);
         deleteTree(folder.resolve("raw"));deleteTree(folder.resolve("work"));
+        doc.remove("driveContext");
         if("DISCARDING".equals(phase)) {Files.deleteIfExists(folder.resolve("saved.mp4"));access(doc).remove("item");}
         access(doc).put("phase","SAVING".equals(phase)?"SAVED":"DISCARDED");
         store(doc);

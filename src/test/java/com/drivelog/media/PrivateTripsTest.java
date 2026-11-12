@@ -17,26 +17,56 @@ class PrivateTripsTest {
         "occupants":[{"ageBand":"14plus","allowed":true},{"ageBand":"under14","guardianAllowed":true}]},
         "audioProcessingConsent":true,"geminiTranscriptConsent":true,"roadReview":{"complete":true}}
         """;
+    @Test void routeNeedsEveryReceiptAndWithdrawalPurgesIt() throws Exception {
+        var store=new PrivateTrips(library);
+        UUID owner=store.issue().accountId(),child=store.issue().accountId();
+        var spec=new PrivateTrips.Registration(UUID.randomUUID(),owner,
+            List.of(new PrivateTrips.Seat(owner,false,null),new PrivateTrips.Seat(child,true,owner)),
+            new PrivateTrips.Source("P",true,"front",0,0,true));
+        String id=store.register(spec).tripId();
+        var optIn=new PrivateTrips.Decision(true,true,true);
+        store.decide(id,owner,PrivateTrips.Role.PASSENGER,owner,optIn);
+        store.decide(id,child,PrivateTrips.Role.PASSENGER,child,optIn);
+        store.decide(id,child,PrivateTrips.Role.GUARDIAN,owner,new PrivateTrips.Decision(true,true,false));
+        var context=new PrivateTrips.DriveContext("서울","속초",List.of(new PrivateTrips.DriveEvent(1234,PrivateTrips.EventKind.ARRIVAL,"속초")));
+        assertThatThrownBy(()->store.attachContext(id,owner,context)).isInstanceOf(ResponseStatusException.class);
+        store.decide(id,child,PrivateTrips.Role.GUARDIAN,owner,optIn);
+        store.attachContext(id,owner,context);
+        var manifest=library.resolve("private/trips/"+id+"/trip.json");
+        assertThat(Files.readString(manifest)).contains("속초");
+        assertThat(store.decide(id,child,PrivateTrips.Role.GUARDIAN,owner,new PrivateTrips.Decision(true,true,false)).phase()).isEqualTo("DISCARDED");
+        assertThat(Files.readString(manifest)).doesNotContain("속초");
+    }
+
     @Test void independentDecisionsThenFinalizeAndResumeInterruptedPurge() throws Exception {
         var store=new PrivateTrips(library);
         UUID owner=store.issue().accountId(), child=store.issue().accountId(), guardian=store.issue().accountId(),source=UUID.randomUUID();
-        var inbox=Files.createDirectories(library.resolve("private/inbox/"+source));
-        Files.writeString(inbox.resolve("trip.json"),manifest);
-        Files.writeString(inbox.resolve("front.mp4"),"front");
-        Files.writeString(inbox.resolve("rear.mp4"),"rear");
-        var request=new PrivateTrips.Registration(source,owner,List.of(new PrivateTrips.Seat(owner,false,null),new PrivateTrips.Seat(child,true,guardian)));
+        var sourceInfo=new PrivateTrips.Source("P",true,"front",0,0,true);
+        var request=new PrivateTrips.Registration(source,owner,List.of(new PrivateTrips.Seat(owner,false,null),new PrivateTrips.Seat(child,true,guardian)),sourceInfo);
         String id=store.register(request).tripId();
-        assertThat(inbox).doesNotExist();
+        byte[] bytes="video".getBytes();
+        String sha=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+        assertThatThrownBy(()->store.upload(id,owner,"front",sha,bytes.length,new java.io.ByteArrayInputStream(bytes))).isInstanceOf(ResponseStatusException.class);
+        assertThat(library.resolve("private/trips/"+id+"/raw")).doesNotExist();
         var yes=new PrivateTrips.Decision(true,true);
         store.decide(id,owner,PrivateTrips.Role.PASSENGER,owner,yes);
         store.decide(id,child,PrivateTrips.Role.PASSENGER,child,yes);
         assertThatThrownBy(()->store.input(id,owner)).isInstanceOf(ResponseStatusException.class);
         assertThatThrownBy(()->store.decide(id,child,PrivateTrips.Role.GUARDIAN,owner,yes)).isInstanceOf(ResponseStatusException.class);
         store.decide(id,child,PrivateTrips.Role.GUARDIAN,guardian,yes);
+        assertThatThrownBy(()->store.upload(id,child,"front",sha,bytes.length,new java.io.ByteArrayInputStream(bytes))).isInstanceOf(ResponseStatusException.class);
+        assertThatThrownBy(()->store.upload(id,owner,"front","0".repeat(64),bytes.length,new java.io.ByteArrayInputStream(bytes))).isInstanceOf(ResponseStatusException.class);
+        assertThat(library.resolve("private/trips/"+id+"/raw/front.mp4")).doesNotExist();
+        assertThat(store.upload(id,owner,"front",sha,bytes.length,new java.io.ByteArrayInputStream(bytes)).phase()).isEqualTo("UPLOAD");
+        assertThat(store.upload(id,owner,"rear",sha,bytes.length,new java.io.ByteArrayInputStream(bytes)).phase()).isEqualTo("READY");
         var input=store.input(id,owner);
         var export=Files.createDirectory(store.work(id).resolve("export"));
         var video=Files.writeString(export.resolve("moment-001.mp4"),"edited content");
-        Files.writeString(export.resolve("cards.json"),"{\"cards\":[{\"id\":\"moment-001\",\"title\":\"Memory\",\"startMs\":1000,\"endMs\":6500}]}");
+        Files.writeString(export.resolve("cards.json"),"{\"cards\":[{\"id\":\"moment-001\",\"file\":\"moment-001.mp4\",\"title\":\"Memory\",\"startMs\":1000,\"endMs\":6500}]}");
+        Files.writeString(export.resolve("master-moment-001.mp4"),"protected edit source");
+        store.protectDraft(id,export);
+        assertThat(input.resolveSibling("raw")).doesNotExist();
+        assertThat(Files.readString(input)).contains("draftVersion");
         UUID jobId=UUID.randomUUID();
         var job=new MediaJobController.Job(jobId,id,"STORY_15","READY",input,export,null);
         var media=mock(MediaJobController.class);var req=new MockHttpServletRequest();

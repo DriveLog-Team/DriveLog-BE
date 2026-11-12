@@ -34,9 +34,24 @@ class PrivateTripController {
 
     @PostMapping("/private-trips")
     @ApiResponse(responseCode="200",description="등록된 운행과 동의 상태",useReturnTypeSchema=true)
-    @Operation(operationId="registerPrivateTrip",summary="전용 수신함의 원본 인수 및 탑승자·보호자 지정",description="sourceId는 서버 수신함 UUID다. 같은 sourceId와 명단으로 재요청할 수 있다. 최초 동의는 모두 미응답.",security=@SecurityRequirement(name="operatorToken"))
+    @Operation(operationId="registerPrivateTrip",summary="파일 없이 운행·탑승자·보호자 등록",description="sourceId는 차량이 생성한 운행 UUID다. source에 정차 상태·카메라 시각을 보낸다. 같은 sourceId와 명단으로 재요청할 수 있다. 최초 동의는 모두 미응답.",security=@SecurityRequirement(name="operatorToken"))
     PrivateTrips.Trip register(@RequestBody PrivateTrips.Registration body,HttpServletRequest req)throws IOException {
         media.authorize(req);return store.register(body);
+    }
+    @PutMapping(value="/private-trips/{id}/media/{side}",consumes="video/mp4")
+    @Operation(operationId="uploadConsentedTrack",summary="UPLOAD 상태에서 소유자가 전방 또는 후방 MP4 전송",
+            description="side는 front 또는 rear. Content-Length와 X-Content-SHA256(소문자 hex)이 필요하다. 두 파일이 확인되면 READY.",
+            security=@SecurityRequirement(name="personToken"))
+    @io.swagger.v3.oas.annotations.parameters.RequestBody(required=true,content=@Content(mediaType="video/mp4",schema=@Schema(type="string",format="binary")))
+    @ApiResponse(responseCode="200",description="업로드 반영 후 운행 상태",useReturnTypeSchema=true)
+    PrivateTrips.Trip upload(@PathVariable String id,@PathVariable String side,@RequestHeader("X-Content-SHA256") String sha,HttpServletRequest req) throws IOException {
+        return store.upload(id,store.person(req),side,sha,req.getContentLengthLong(),req.getInputStream());
+    }
+    @PutMapping("/private-trips/{id}/context")
+    @Operation(operationId="attachDriveContext",summary="전원 위치 맥락 동의 후 출발·도착지 및 운행 이벤트 등록",security=@SecurityRequirement(name="personToken"))
+    @ApiResponse(responseCode="200",description="맥락 등록 후 운행 상태",useReturnTypeSchema=true)
+    PrivateTrips.Trip context(@PathVariable String id,@RequestBody PrivateTrips.DriveContext context,HttpServletRequest req)throws IOException {
+        return store.attachContext(id,store.person(req),context);
     }
     @GetMapping("/private-trips")
     @ApiResponse(responseCode="200",description="본인에게 배정된 운행 배열",useReturnTypeSchema=true)

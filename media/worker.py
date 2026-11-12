@@ -1,5 +1,6 @@
 """Local DriveLog media worker. Inputs are trusted job manifests from the ingest stage."""
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import tempfile
 import wave
 import gemini_demo
 import road_privacy
+import sound_events
 from file_hash import digest
 from extraction_policy import require_extraction, reviewed_intervals, overlapping
 from semantic_ranker import MemoryRanker, REVISION
@@ -73,7 +75,8 @@ def transcribe(audio, wd, source_offset, manifest_path, blocked=()):
     model = os.environ["WHISPER_MODEL"]
     safe = [(a-source_offset,b-source_offset) for s,e in intervals(duration,silence)
             for a,b in road_privacy.safe_parts(source_offset+s,source_offset+e,blocked) if b-a >= 500]
-    for group, (start, end) in enumerate(safe):
+    windows=((start,min(start+30000,end)) for begin,end in safe for start in range(begin,end,30000))
+    for group, (start, end) in enumerate(windows):
         require_audio_consent(manifest_path)
         chunk = wd / "speech.wav"
         ff("-ss", start / 1000, *input_args(audio), "-t", (end-start)/1000, "-c:a", "pcm_s16le", chunk)
@@ -136,6 +139,14 @@ def plain(text):
     return " ".join(text.split()).replace("\\", "＼").replace("{", "｛").replace("}", "｝")
 
 
+def attach_context(cards, context):
+    if not context:
+        return
+    for card in cards:
+        events=[e for e in context.get("events",[]) if card["startMs"]<=e["atMs"]<card["endMs"]]
+        card["driveContext"]=dict(departure=context.get("departure"),destination=context.get("destination"),events=events)
+
+
 def subtitles(card, path):
     style = """[Script Info]
 ScriptType: v4.00+
@@ -147,13 +158,23 @@ Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackC
 Style: Caption,Noto Sans CJK KR,54,&H00FFFFFF,&H00FFFFFF,&H00202020,&HA0000000,0,0,0,0,100,100,0,0,1,3,1,2,55,55,96,1
 Style: Title,Noto Sans CJK KR,58,&H00FFFFFF,&H00FFFFFF,&H00202020,&HA0000000,-1,0,0,0,100,100,0,0,1,3,1,8,55,55,68,1
 Style: Summary,Noto Sans CJK KR,37,&H00FFFFFF,&H00FFFFFF,&H00202020,&HA0000000,0,0,0,0,100,100,0,0,1,2,1,8,60,60,210,1
+Style: Route,Noto Sans CJK KR,32,&H00FFFFFF,&H00FFFFFF,&H00202020,&HA0000000,0,0,0,0,100,100,0,0,1,2,1,2,48,48,30,1
+Style: Place,Noto Sans CJK KR,32,&H00FFFFFF,&H00FFFFFF,&H00202020,&HA0000000,0,0,0,0,100,100,0,0,1,2,1,8,48,48,285,1
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
     start, end = card["startMs"], card["endMs"]
     events = [(0, end-start, "Title", card["title"])]
     if card.get("recommendation", {}).get("provider") == "gemini":
-        events.append((0, min(4200, end-start), "Summary", card["recommendation"]["reason"]))
+        events.append((0, min(4200, end-start), "Summary", card.get("summary") or card["recommendation"]["reason"]))
+    route=card.get("driveContext",{})
+    places=" → ".join(p for p in (route.get("departure"),route.get("destination")) if p)
+    if places:
+        events.append((0,end-start,"Route",places))
+    for event in route.get("events",[]):
+        if event.get("label"):
+            at=max(0,event["atMs"]-start)
+            events.append((at,min(at+2200,end-start),"Place",event["label"]))
     for cue in card["cues"]:
         a, b = max(start, cue["startMs"]), min(end, cue["endMs"])
         if a < b:
@@ -162,7 +183,7 @@ Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
                                     for a,b,s,t in events), encoding="utf-8-sig")
 
 
-def render(card, tracks, audio_name, wd, dest, blur_intervals=(), masks=()):
+def render(card, tracks, audio_name, wd, dest, blur_intervals=(), masks=(), captions=True):
     start, end = card["startMs"], card["endMs"]
     duration = (end-start)/1000
     args, filters = [], []
@@ -193,7 +214,7 @@ def render(card, tracks, audio_name, wd, dest, blur_intervals=(), masks=()):
         video = "[composite]"
     else:
         video = "[road]"
-    filters.append(video+"ass=captions.ass[video]")
+    filters.append(video+("ass=captions.ass" if captions else "null")+"[video]")
     ff("-loglevel","error",*args,"-filter_complex_threads","1","-filter_complex",";".join(filters),
        "-map","[video]","-map","2:a:0","-t",duration,"-map_metadata","-1","-c:v","libx264",
        "-preset","veryfast","-threads","2","-pix_fmt","yuv420p","-c:a","aac","-movflags","+faststart",dest,cwd=wd)
@@ -215,9 +236,19 @@ def apply_edit(cards, edit, limit):
     texts = edit.get("captions", [c["text"] for c in card["cues"]])
     if not isinstance(texts,list) or len(texts)!=len(card["cues"]) or any(not isinstance(t,str) or len(t)>200 for t in texts):
         raise ValueError("Invalid caption edits")
+    previous_cues=card["cues"]
     card.update(startMs=start,endMs=end,title=title, cues=[dict(c,text=t,startMs=max(start,c["startMs"]),endMs=min(end,c["endMs"]))
         for c,t in zip(card["cues"],texts) if c["endMs"]>start and c["startMs"]<end])
-    card["summary"] = " ".join(c["text"] for c in card["cues"][:2])[:160]
+    if previous_cues!=card["cues"]:
+        card["summary"] = " ".join(c["text"] for c in card["cues"][:2])[:160] or card["title"]
+    if "driveContext" in card:
+        card["driveContext"]["events"]=[e for e in card["driveContext"]["events"] if start<=e["atMs"]<end]
+    if "soundEvent" in card:
+        event=card["soundEvent"]
+        if not overlapping(start,end,[(event["startMs"],event["endMs"])]):
+            card.pop("soundEvent")
+        else:
+            event.update(startMs=max(start,event["startMs"]),endMs=min(end,event["endMs"]))
     if "recommendation" in card:
         reason = card["recommendation"]
         evidence = next((c for c in card["cues"] if c["startMs"] < reason["quoteEndMs"]
@@ -228,11 +259,63 @@ def apply_edit(cards, edit, limit):
             card.pop("recommendation")
 
 
+def caption_master(master, offset, card, wd, output):
+    subtitles(card, wd / "captions.ass")
+    ff("-v","error","-ss",(card["startMs"]-offset)/1000,*input_args(master),
+       "-t",(card["endMs"]-card["startMs"])/1000,"-vf","ass=captions.ass",
+       "-map","0:v:0","-map","0:a:0","-map_metadata","-1","-c:v","libx264","-preset","veryfast",
+       "-threads","2","-c:a","aac","-movflags","+faststart",output,cwd=wd)
+
+
+def from_draft(manifest, library, spec, profile, edit_file):
+    canonical = library / spec["access"]["draftVersion"]
+    initial = read_json(canonical/"cards.json")
+    limit = {"STORY_15":15000,"SHORT_30":30000}[profile]
+    edit = read_json(edit_file) if edit_file else None
+    if edit is None and initial["profile"] == profile:
+        return canonical
+    base = edit["baseVersion"] if edit else initial["version"]
+    if not re.fullmatch("[a-f0-9]{32}",base):
+        raise ValueError("Invalid draft version")
+    parent = read_json(library/base/"cards.json")
+    if parent["sourceRevision"] != initial["sourceRevision"]:
+        raise ValueError("Different protected draft")
+    if edit:
+        if parent["profile"] != profile:
+            raise ValueError("Different edit profile")
+        apply_edit(parent["cards"],edit,limit)
+        parent["cards"] = [c for c in parent["cards"] if c["id"]==edit["id"]]
+    else:
+        for card in parent["cards"]:
+            if card["endMs"]-card["startMs"]>limit:
+                anchor=card.get("recommendation",{}).get("quoteStartMs",card["startMs"])
+                start=min(max(card["startMs"],anchor),card["endMs"]-limit)
+                apply_edit([card],dict(id=card["id"],startMs=start,endMs=start+limit),limit)
+    version=hashlib.sha256(json.dumps([initial["version"],profile,edit],sort_keys=True).encode()).hexdigest()[:32]
+    target=library/version
+    if (target/"cards.json").is_file():
+        return target
+    offsets={c["id"]:c["startMs"] for c in initial["cards"]}
+    with tempfile.TemporaryDirectory(dir=library) as tmp:
+        wd=Path(tmp)
+        stage=wd/"release";stage.mkdir()
+        for card in parent["cards"]:
+            require_audio_consent(manifest)
+            caption_master(canonical/("master-"+card["file"]),offsets[card["id"]],card,wd,stage/card["file"])
+        parent.update(version=version,profile=profile)
+        write_json(stage/"cards.json",parent)
+        require_audio_consent(manifest)
+        stage.rename(target)
+    return target
+
+
 def run(manifest, library, profile, edit_file=None):
     manifest = manifest.resolve(strict=True)
     spec = read_json(manifest)
     require_audio_consent(manifest)
     road_review = reviewed_intervals(spec)
+    if spec.get("access",{}).get("draftVersion"):
+        return from_draft(manifest,library.resolve(),spec,profile,edit_file)
     root = manifest.parent
     tracks = {}
     for direction in ("front","rear"):
@@ -266,14 +349,14 @@ def run(manifest, library, profile, edit_file=None):
     media_spec = {k: v for k, v in spec.items() if k not in ("gleoExcerptConsent", "geminiTranscriptConsent", "recommendationMode")}
     source_revision = hashlib.sha256(json.dumps([key,media_spec,hashes],
                                                 sort_keys=True).encode()).hexdigest()
-    fingerprint = [source_revision,profile,edit,"render-v3",gemini_demo.REVISION if mode == "gleo-demo" else REVISION]
+    fingerprint = [source_revision,profile,edit,"render-audio-events-v1",gemini_demo.REVISION if mode == "gleo-demo" else REVISION]
     version = hashlib.sha256(json.dumps(fingerprint,sort_keys=True).encode()).hexdigest()[:32]
     target = library/version
     if (target/"cards.json").is_file():
         return target
-    with tempfile.TemporaryDirectory(dir=library) as temp:
+    with tempfile.TemporaryDirectory(dir=library) as temp, closing(road_privacy.MaskStore(Path(temp)/"masks.sqlite")) as mask_store:
         wd = Path(temp)
-        masks, blocked, privacy = road_privacy.scan(tracks, road_review, lambda: require_audio_consent(manifest))
+        masks, blocked, privacy = road_privacy.scan(tracks, road_review, lambda: require_audio_consent(manifest),mask_store)
         cues = []
         if edit is not None:
             base = edit.get("baseVersion","")
@@ -287,10 +370,10 @@ def run(manifest, library, profile, edit_file=None):
             selected = [next(c for c in cards if c["id"] == edit["id"])]
         else:
             wav = wd/"audio.wav"
+            ff("-loglevel","error",*input_args(primary["path"]),"-map","0:a:0","-vn","-ar","16000","-ac","1","-c:a","pcm_s16le",wav)
             if mode == "local" and cache.is_file():
                 cues = read_json(cache)
             else:
-                ff("-loglevel","error",*input_args(primary["path"]),"-map","0:a:0","-vn","-ar","16000","-ac","1","-c:a","pcm_s16le",wav)
                 cues = transcribe(wav,wd,primary["offsetMs"],manifest,blocked)
                 require_audio_consent(manifest)
                 if mode == "local":
@@ -299,9 +382,11 @@ def run(manifest, library, profile, edit_file=None):
                     os.replace(draft,cache)
             cards = make_cards(cues,limit)
             cards = [card for card in cards if not overlapping(card["startMs"], card["endMs"], blocked)]
+            attach_context(cards,spec.get("driveContext"))
             require_audio_consent(manifest)
             if mode == "gleo-demo":
                 selected = gemini_demo.select(cards, authorize_gemini) if cards else []
+                gemini_demo.write_summaries(selected,authorize_gemini)
                 authorize_gemini()
                 with wave.open(str(wav), "rb") as raw:
                     source_start = primary["offsetMs"]
@@ -310,6 +395,17 @@ def run(manifest, library, profile, edit_file=None):
                     add_surrounding_footage(card, cues, source_start, source_end, blocked, limit)
             else:
                 selected = MemoryRanker().select(cards) if cards else []
+            if len(selected)<3:
+                events=sound_events.detect(wav,primary["offsetMs"],blocked,lambda:require_audio_consent(manifest))
+                last_id=max((int(c["id"].split("-")[1]) for c in cards),default=0)
+                sound_events.add_cards(selected,events,last_id,limit)
+                for card in selected:
+                    if card.get("soundEvent"):
+                        with wave.open(str(wav),"rb") as raw:
+                            end=primary["offsetMs"]+raw.getnframes()*1000//raw.getframerate()
+                        others=[(c["startMs"],c["endMs"]) for c in selected if c is not card]
+                        add_surrounding_footage(card,cues,primary["offsetMs"],end,blocked+others,limit)
+        attach_context(selected,spec.get("driveContext"))
         staging = wd/"release"
         staging.mkdir()
         for card in selected:
@@ -317,7 +413,11 @@ def run(manifest, library, profile, edit_file=None):
             if overlapping(card["startMs"],card["endMs"],blocked):
                 raise ValueError("Edit overlaps excluded road footage")
             card["file"] = card["id"]+".mp4"
-            render(card,tracks,audio_name,wd,staging/card["file"],road_review.get("blur", []), masks)
+            personal = "access" in spec
+            dest = staging / (("master-" if personal else "") + card["file"])
+            render(card,tracks,audio_name,wd,dest,road_review.get("blur", []),masks,captions=not personal)
+            if personal:
+                caption_master(dest,card["startMs"],card,wd,staging/card["file"])
         write_json(staging/"cards.json",dict(tripId=spec["tripId"],profile=profile,version=version,sourceRevision=source_revision,
                    status="READY" if selected else ("NO_MEMORY_CANDIDATE" if cues else "NO_SPEECH_CANDIDATE"),
                    cards=selected,privacy=privacy))

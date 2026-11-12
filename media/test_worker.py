@@ -33,6 +33,23 @@ class ConversationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             apply_edit(cards,dict(id="moment-001",endMs=12000),15000)
 
+    def test_route_overlay_uses_only_overlapping_events_and_sends_no_places_to_gemini(self):
+        import gemini_demo
+        from worker import attach_context, subtitles
+        cards=make_cards([cue(0,1000,4000,"다음에도 같이 오자")],15000)
+        attach_context(cards,dict(departure="서울",destination="속초",events=[
+            dict(atMs=2900,kind="ARRIVAL",label="시내 도착"),dict(atMs=4000,kind="LANDMARK",label="다음 장면")]))
+        data=gemini_demo.candidate_payload(cards[0])
+        self.assertEqual(data["driveEvents"],["ARRIVAL"])
+        self.assertNotIn("속초",str(data))
+        with TemporaryDirectory() as root:
+            file=Path(root,"captions.ass")
+            subtitles(cards[0],file)
+            output=file.read_text("utf-8-sig")
+            self.assertIn("서울 → 속초",output)
+            self.assertIn("시내 도착",output)
+            self.assertNotIn("다음 장면",output)
+
     def test_subtitle_text_cannot_inject_ass_commands(self):
         self.assertNotIn("\\", plain(r"{\pos(0,0)}\N"))
         self.assertNotIn("{", plain("{test}"))
