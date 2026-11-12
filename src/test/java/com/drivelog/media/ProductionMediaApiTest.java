@@ -36,6 +36,15 @@ class ProductionMediaApiTest {
         assertThat(get("/api/frontend.html",false,false).body()).contains("/api/media/jobs/{id}/edits");
         var doc=JsonMapper.builder().build().readTree(get("/api/v3/api-docs",false,false).body());
         assertThat(doc.get("paths").propertyNames()).contains("/api/private-trips/{id}/finalize","/api/library/{id}/clip","/api/library/{tripId}/handoffs").noneMatch(p->p.contains("/v1/"));
+        var paths=doc.get("paths");
+        for(var path:paths.propertyNames()) {
+            if(!path.startsWith("/api/private-trips") && !path.startsWith("/api/library") && !path.equals("/api/accounts")) continue;
+            for(var operation:paths.get(path)) {
+                var responses=operation.get("responses");
+                assertThat(responses.propertyNames()).as(path).anyMatch(code -> code.startsWith("2") && responses.get(code).has("content"));
+            }
+        }
+        assertThat(paths.get("/api/library").get("get").get("responses").get("200").toString()).contains("array","Item");
         assertThat(get("/api/trips",true,false).statusCode()).isEqualTo(401);
         assertThat(get("/api/trips",false,true).statusCode()).isEqualTo(401);
         assertThat(get("/api/trips",true,true).body()).isEqualTo("[]");
