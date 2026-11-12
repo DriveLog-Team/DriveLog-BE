@@ -1,0 +1,67 @@
+package com.drivelog.media;
+
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.List;
+import java.util.UUID;
+import org.springframework.context.annotation.Profile;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@Profile("media")
+@RequestMapping("/api")
+@Tag(name="개인 운행 동의와 보관함")
+@io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode="401",description="HTTPS 및 작업에 맞는 자격증명 필요",content=@io.swagger.v3.oas.annotations.media.Content)
+class PrivateTripController {
+    private final PrivateTrips store;
+    private final MediaJobController media;
+    PrivateTripController(PrivateTrips store,MediaJobController media){this.store=store;this.media=media;}
+    @ModelAttribute void noCache(HttpServletResponse response){response.setHeader("Cache-Control","no-store");}
+
+    @PostMapping("/accounts")
+    @ResponseStatus(HttpStatus.CREATED)
+    @Operation(operationId="issuePersonalAccount",summary="인증한 사용자에게 개인 자격증명 최초 발급",description="신뢰된 팀 서버가 발급하고 자기 사용자 계정에 연결한다. accessToken은 최초 한 번만 반환한다.",security=@SecurityRequirement(name="operatorToken"))
+    PrivateTrips.Account issue(HttpServletRequest req)throws IOException {media.authorize(req);return store.issue();}
+
+    @PostMapping("/private-trips")
+    @Operation(operationId="registerPrivateTrip",summary="전용 수신함의 원본 인수 및 탑승자·보호자 지정",description="sourceId는 서버 수신함 UUID다. 같은 sourceId와 명단으로 재요청할 수 있다. 최초 동의는 모두 미응답.",security=@SecurityRequirement(name="operatorToken"))
+    PrivateTrips.Trip register(@RequestBody PrivateTrips.Registration body,HttpServletRequest req)throws IOException {
+        media.authorize(req);return store.register(body);
+    }
+    @GetMapping("/private-trips")
+    @Operation(operationId="listAssignedTrips",summary="본인이 탑승자 또는 보호자인 운행 목록",security=@SecurityRequirement(name="personToken"))
+    List<PrivateTrips.Trip> assigned(HttpServletRequest req)throws IOException {return store.assigned(store.person(req));}
+    @GetMapping("/private-trips/{id}")
+    @Operation(operationId="getConsentStatus",summary="해당 운행 동의 현황·원본 파기 상태 조회",security=@SecurityRequirement(name="personToken"))
+    PrivateTrips.Trip state(@PathVariable String id,HttpServletRequest req)throws IOException {return store.status(id,store.person(req));}
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode="403",description="지정된 응답자만 동의를 제출할 수 있음",content=@io.swagger.v3.oas.annotations.media.Content)
+    @PutMapping("/private-trips/{id}/consents/{occupant}/{role}")
+    @Operation(operationId="recordConsent",summary="지정된 본인 또는 보호자의 동의·거절·철회",description="extraction과 geminiTranscript 모두 명시한다. 하나라도 false면 처리를 취소하고 원본과 중간물, 보관된 편집본의 삭제를 시작한다.",security=@SecurityRequirement(name="personToken"))
+    PrivateTrips.Trip consent(@PathVariable String id,@PathVariable UUID occupant,@PathVariable PrivateTrips.Role role,
+            @RequestBody PrivateTrips.Decision body,HttpServletRequest req)throws IOException {
+        return store.decide(id,occupant,role,store.person(req),body);
+    }
+    @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode="409",description="작업 진행 중 또는 확정 대상 충돌",content=@io.swagger.v3.oas.annotations.media.Content)
+    @PostMapping("/private-trips/{id}/finalize")
+    @Operation(operationId="finalizeTrip",summary="선택한 편집본을 개인 보관함에 저장하고 운행 원본 파기",description="READY인 작업에서 jobId와 moment를 지정한다. 같은 선택으로 재호출 가능. SAVED는 원본·중간물 삭제 완료를 뜻한다.",security=@SecurityRequirement(name="personToken"))
+    PrivateTrips.Trip finish(@PathVariable String id,@RequestBody PrivateTrips.Selection body,HttpServletRequest req)throws IOException {
+        return store.finish(id,store.person(req),body,media,req);
+    }
+    @DeleteMapping("/private-trips/{id}")
+    @Operation(operationId="discardTrip",summary="저장 없이 운행 폐기 또는 보관 영상 삭제",security=@SecurityRequirement(name="personToken"))
+    PrivateTrips.Trip discard(@PathVariable String id,HttpServletRequest req)throws IOException {return store.discard(id,store.person(req));}
+    @GetMapping("/library")
+    @Operation(operationId="listLibrary",summary="본인의 보관함을 최근 저장순으로 조회",security=@SecurityRequirement(name="personToken"))
+    List<PrivateTrips.Item> library(HttpServletRequest req)throws IOException {return store.items(store.person(req));}
+    @GetMapping(value="/library/{id}/clip",produces="video/mp4")
+    @Operation(operationId="getLibraryClip",summary="원본 파기 후에도 본인 보관 영상을 재생",security=@SecurityRequirement(name="personToken"))
+    FileSystemResource video(@PathVariable String id,HttpServletRequest req)throws IOException {
+        return new FileSystemResource(store.saved(id,store.person(req)));
+    }
+}
