@@ -6,6 +6,7 @@
 <section id="private"><h2>개인 운행 시작과 동의</h2>
 <p><a href="#drive-timeline">차량 음성 표시 · 동승자 버튼 · 드라이브 타임라인 연동</a></p>
 <section id="drive-timeline"><h3>주행 중 표시하고 도착 후 함께 보기</h3>
+<p>기존 동의를 수정할 때 <code>useTripContext</code>와 <code>shareMarkedClips</code>를 생략하면 각각의 기존 선택이 유지된다. 처음 동의할 때 두 선택의 기본값은 false다. 장소를 이미 사용한 뒤 위치 동의를 명시적으로 철회하면 운행이 폐기된다.</p>
 <p>출발 시 팀 서버가 같은 주행에 참여할 계정과 출발 시각을 등록한다. 기존 소유자·탑승자 UUID를 사용하며, 같은 입력으로 재시도할 수 있다. 동승자는 기존 개인 운행 목록에서 배정된 주행을 연다.</p>
 <pre>POST /api/private-trips/departures  (운영자 토큰)
 {"sourceId":"주행 UUID","owner":"소유자 UUID","startedAt":"2026-11-13T05:00:00Z",

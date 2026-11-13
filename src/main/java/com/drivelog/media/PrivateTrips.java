@@ -351,7 +351,8 @@ class PrivateTrips {
         if("DISCARDED".equals(phase(doc)) && !yes) return view(doc);
         if(!Set.of("PENDING","UPLOAD","READY","SAVED").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
         var receipts=(ObjectNode)access(doc).get("receipts");String key=occupant+"/"+role;
-        boolean context=Boolean.TRUE.equals(d.useTripContext());
+        boolean priorContext=receipts.path(key).path("useTripContext").asBoolean(false);
+        boolean context=yes && (d.useTripContext()==null?priorContext:d.useTripContext());
         boolean priorShare=receipts.path(key).path("shareMarkedClips").asBoolean(false);
         boolean share=yes && (d.shareMarkedClips()==null?priorShare:d.shareMarkedClips());
         if(yes && agreed(receipts.path(key))) {

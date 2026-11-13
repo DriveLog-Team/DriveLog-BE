@@ -50,7 +50,7 @@ class PrivateTripsTest {
         store.protectDraft(id,export);
         assertThat(store.timeline(id,child).entries().getFirst().state()).isEqualTo("SHARING_DISABLED");
         assertThatThrownBy(()->store.markedClip(id,child,mark)).isInstanceOf(ResponseStatusException.class);
-        store.decide(id,child,PrivateTrips.Role.GUARDIAN,guardian,yes);
+        store.decide(id,child,PrivateTrips.Role.GUARDIAN,guardian,new PrivateTrips.Decision(true,true,null,true));
         assertThat(store.timeline(id,child).entries().getFirst().place()).isEqualTo("바다");
         assertThat(store.markedClip(id,child,mark)).hasContent("preview");
         assertThat(store.timeline(id,child).entries().get(1).state()).isEqualTo("NO_CLIP");
