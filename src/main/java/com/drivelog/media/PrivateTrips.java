@@ -48,6 +48,23 @@ class PrivateTrips {
     record Item(String tripId, String title, long durationMs, String savedAt) {}
 
     private final JsonMapper json=JsonMapper.builder().build();
+    @Value("${media.vault-bucket:}") private String vaultBucket="";
+    @Value("${media.worker:media/worker.py}") private Path workerScript;
+    @Value("${media.python:python3}") private String vaultPython;
+    private void vault(String command,ObjectNode doc) throws IOException {
+        if (vaultBucket.isBlank()) return;
+        Process proc=new ProcessBuilder(vaultPython,workerScript.resolveSibling("vault.py").toString(),command,
+                vaultBucket,accounts.getParent().toString(),doc.get("tripId").asText())
+                .redirectError(ProcessBuilder.Redirect.INHERIT).start();
+        try {
+            try (var body=proc.getOutputStream()) { json.writeValue(body,doc); }
+            if (!proc.waitFor(100,java.util.concurrent.TimeUnit.SECONDS) || proc.exitValue()!=0)
+                throw new ResponseStatusException(SERVICE_UNAVAILABLE,"Vault temporarily unavailable");
+        } catch(InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Vault operation interrupted",e);
+        } finally { if (proc.isAlive()) proc.destroyForcibly(); }
+    }
     private final SecureRandom random=new SecureRandom();
     private final Path accounts, inbox, trips;
     private final Map<String,Integer> workers=new HashMap<>();
@@ -63,10 +80,33 @@ class PrivateTrips {
             for(Path entry:entries.toList()) {
                 if (!Files.isRegularFile(entry.resolve("trip.json"))) continue;
                 ObjectNode doc=read(entry.getFileName().toString());
+                Path raw=entry.resolve("raw");
+                if (Files.isDirectory(raw) && access(doc).has("uploads")) {
+                    try (var files=Files.list(raw)) {
+                        for (Path file:files.toList()) {
+                            String name=file.getFileName().toString();
+                            boolean orphan=name.matches("(front|rear)(-[a-f0-9]{64})?[.]mp4")
+                                    && java.util.stream.Stream.of("front","rear").noneMatch(side ->
+                                        access(doc).path("uploads").has(side) && ("raw/"+name).equals(doc.path(side).path("file").asText()));
+                            if (orphan || (name.startsWith("upload-") && name.endsWith(".part"))) Files.delete(file);
+                        }
+                    }
+                }
                 if ("IMPORTING".equals(phase(doc))) finishImport(doc);
-                if(!access(doc).has("draftVersion") && Set.of("READY","UPLOAD","PENDING").contains(phase(doc))) deleteTree(entry.resolve("work"));
+                if (Files.isDirectory(entry.resolve("work"))) {
+                    try (var paths=Files.list(entry.resolve("work"))) {
+                        for (Path part:paths.toList()) {
+                            String name=part.getFileName().toString();
+                            if (name.startsWith("tmp") || name.startsWith("edit-")) deleteTree(part);
+                        }
+                    }
+                }
                 if(access(doc).has("draftVersion")) deleteTree(entry.resolve("raw"));
-                cleanup(doc);
+                try { cleanup(doc); }
+                catch (ResponseStatusException e) {
+                    if (e.getStatusCode()!=SERVICE_UNAVAILABLE) throw e;
+                    org.slf4j.LoggerFactory.getLogger(getClass()).warn("Vault recovery deferred");
+                }
             }
         }
     }
@@ -192,20 +232,35 @@ class PrivateTrips {
                 || !Set.of("UPLOAD","READY").contains(phase(doc))) throw new ResponseStatusException(FORBIDDEN);
         return doc;
     }
+    private long reservedUploadBytes;
+    static final long EDIT_HEADROOM = 2_000_000_000L;
+
+    synchronized void checkSpace(long available, long requested) {
+        if (available - EDIT_HEADROOM - reservedUploadBytes < requested)
+            throw new ResponseStatusException(INSUFFICIENT_STORAGE);
+    }
+    private final Set<String> editing = new HashSet<>();
+    private final Set<String> uploading = new HashSet<>();
+
     Trip upload(String id, UUID actor, String side, String digest, long length, InputStream bytes) throws IOException {
         long limit=8L*1024*1024*1024;
         Path raw=dir(id).resolve("raw"), temp;
+        String key=id+"/"+side;
+        boolean requireAudio;
+        long remaining=length;
         synchronized(this) {
             ObjectNode doc=uploadAllowed(id,actor,side,digest);
             String prior=access(doc).get("uploads").path(side).asText("");
-            if(!prior.isEmpty()) {
-                if(!prior.equals(digest)) throw new ResponseStatusException(CONFLICT);
-                return view(doc);
-            }
+            if (access(doc).has("draftVersion")) throw new ResponseStatusException(CONFLICT);
+            if (uploading.contains(key) || editing.contains(id)) throw new ResponseStatusException(CONFLICT);
+            if (prior.equals(digest) && access(doc).path("validated").path(side).asBoolean()) return view(doc);
+            requireAudio=side.equals(doc.path("audioSource").asText());
             if(length<=0 || length>limit) throw new ResponseStatusException(BAD_REQUEST);
             Files.createDirectories(raw);
-            if(Files.getFileStore(raw).getUsableSpace()-length<2_000_000_000L) throw new ResponseStatusException(INSUFFICIENT_STORAGE);
+            checkSpace(Files.getFileStore(raw).getUsableSpace(),length);
             temp=Files.createTempFile(raw,"upload-",".part");
+            reservedUploadBytes+=length;
+            uploading.add(key);
             started(id);
         }
         try {
@@ -219,20 +274,29 @@ class PrivateTrips {
                     if(total>length) throw new ResponseStatusException(BAD_REQUEST);
                     synchronized(this){uploadAllowed(id,actor,side,digest);}
                     sha.update(buffer,0,n);output.write(buffer,0,n);
+                    synchronized(this) { reservedUploadBytes-=n; remaining-=n; }
                 }
             }
             if(total!=length || !HexFormat.of().formatHex(sha.digest()).equals(digest)) throw new ResponseStatusException(BAD_REQUEST);
+            VideoProbe.validate(temp,requireAudio);
             synchronized(this) {
                 ObjectNode doc=uploadAllowed(id,actor,side,digest);
                 var uploads=(ObjectNode)access(doc).get("uploads");
-                if(uploads.has(side) && !digest.equals(uploads.path(side).asText())) throw new ResponseStatusException(CONFLICT);
-                Files.move(temp,raw.resolve(side+".mp4"),ATOMIC_MOVE,REPLACE_EXISTING);
+                Path previous = dir(id).resolve(doc.path(side).path("file").asText());
+                Path target = uploads.has(side) ? raw.resolve(side+"-"+digest+".mp4") : raw.resolve(side+".mp4");
+                Files.move(temp,target,ATOMIC_MOVE,REPLACE_EXISTING);
+                ((ObjectNode)doc.get(side)).put("file","raw/"+target.getFileName());
+                access(doc).withObjectProperty("validated").put(side,true);
                 uploads.put(side,digest);
                 if(uploads.has("front") && uploads.has("rear")) access(doc).put("phase","READY");
-                store(doc);return view(doc);
+                store(doc);
+                if (!previous.equals(target)) Files.deleteIfExists(previous);
+                return view(doc);
             }
         } finally {
-            try {Files.deleteIfExists(temp);} finally {stopped(id);}
+            try {Files.deleteIfExists(temp);} finally {
+                synchronized (this) { reservedUploadBytes-=remaining; uploading.remove(key); stopped(id); }
+            }
         }
     }
     private List<Seat> seats(ObjectNode doc) {
@@ -359,6 +423,7 @@ class PrivateTrips {
             if(receipts.path(key).path("useTripContext").asBoolean()==context) {
                 if(share!=priorShare) {
                     ((ObjectNode)receipts.get(key)).put("shareMarkedClips",share).put("at",Instant.now().toString());
+                    if ("SAVED".equals(phase(doc))) vault("save",doc);
                     store(doc);
                 }
                 return view(doc);
@@ -443,9 +508,23 @@ class PrivateTrips {
                     doc.put("audioProcessingConsent",false).put("geminiTranscriptConsent",false);
                     store(doc);
                 }
+                if ("SAVED".equals(phase(doc)) && !vaultBucket.isBlank() && !access(doc).path("vaultSynced").asBoolean()) {
+                    vault("save",doc);
+                    access(doc).put("vaultSynced",true);
+                    store(doc);
+                }
                 cleanup(doc);
             }
         }
+    }
+    synchronized void startEdit(String id) {
+        if (uploading.contains(id+"/front") || uploading.contains(id+"/rear")) throw new ResponseStatusException(CONFLICT);
+        editing.add(id);
+        started(id);
+    }
+    synchronized void stopEdit(String id) throws IOException {
+        stopped(id);
+        if (!workers.containsKey(id)) editing.remove(id);
     }
     synchronized void started(String id){workers.merge(id,1,Integer::sum);}
     synchronized void stopped(String id) throws IOException {
@@ -484,7 +563,13 @@ class PrivateTrips {
         String id=doc.get("tripId").asText(),phase=phase(doc);
         if(workers.containsKey(id) || !Set.of("SAVING","DISCARDING").contains(phase)) return;
         Path folder=dir(id);
-        deleteTree(folder.resolve("raw"));deleteTree(folder.resolve("work"));
+        if ("SAVING".equals(phase)) {
+            vault("save",doc);
+            if (!vaultBucket.isBlank()) access(doc).put("vaultSynced",true);
+        } else if (access(doc).has("item")) {
+            vault("revoke",doc);
+        }
+        deleteTree(folder.resolve("raw"));deleteTree(folder.resolve("work"));deleteTree(folder.resolve("jobs"));
         doc.remove("driveContext");
         if("DISCARDING".equals(phase)) {
             Files.deleteIfExists(folder.resolve("saved.mp4"));access(doc).remove("item");

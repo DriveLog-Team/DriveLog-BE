@@ -1,4 +1,6 @@
 """Gemini Developer API stand-in for the proposed Gleo conversation selector."""
+import hashlib
+from pathlib import Path
 import json
 import os
 from urllib.error import HTTPError
@@ -126,6 +128,17 @@ def request_json(prompt, schema, content, authorize_transcript):
     req = Request(f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent",
                   headers=headers, data=json.dumps(body).encode())
     authorize_transcript()
+    checkpoint = os.environ.get("DRIVELOG_JOB_CHECKPOINT")
+    result_file = None
+    if checkpoint:
+        directory = Path(checkpoint)
+        directory.mkdir(exist_ok=True)
+        key = hashlib.sha256(MODEL.encode() + req.data).hexdigest()
+        result_file = directory / (key + ".json")
+        if result_file.is_file():
+            return json.loads(result_file.read_text("utf8"))
+        # An interrupted request may already have been billed. Never replay an ambiguous call.
+        (directory / (key + ".sent")).touch(exist_ok=False)
     try:
         with urlopen(req, timeout=50) as res:
             response = json.load(res)
@@ -135,7 +148,12 @@ def request_json(prompt, schema, content, authorize_transcript):
     if candidate.get("finishReason") != "STOP":
         raise ValueError("Gemini did not return a complete response")
     data = "".join(p.get("text", "") for p in candidate["content"]["parts"] if not p.get("thought"))
-    return json.loads(data)
+    result = json.loads(data)
+    if result_file:
+        tmp = result_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(result), encoding="utf8")
+        tmp.replace(result_file)
+    return result
 
 
 def list_schema(fields):

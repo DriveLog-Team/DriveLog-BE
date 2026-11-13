@@ -27,6 +27,10 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+      - name: Install video probe for upload tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Test and package
         run: |
           mvn --batch-mode --no-transfer-progress verify
@@ -54,13 +58,17 @@ jobs:
           gcloud storage cp /tmp/drivelog-release.json "gs://$RELEASE_BUCKET/current.json" --quiet
       - name: Verify deployed commit
         env:
-          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
+          DEPLOY_URL: https://35.216.33.209
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$DEPLOY_URL"
+          check=(curl --proto "=https" --tlsv1.2 --fail --silent --show-error --max-time 8)
           for attempt in $(seq 1 90); do
-            if curl --fail --silent --max-time 5 "$DEPLOY_URL/api/status" | jq -e --arg sha "$GITHUB_SHA" '.service == "drivelog-api" and .status == "ready" and .release == $sha' >/dev/null; then
+            if "${check[@]}" "$DEPLOY_URL/api/status" | jq -e --arg sha "$GITHUB_SHA" '.service == "drivelog-api" and .status == "ready" and .release == $sha' >/dev/null; then
+              "${check[@]}" "$DEPLOY_URL/api/v3/api-docs" | jq -e '.paths["/api/private-trips/{id}/media/{side}"].put.responses["422"] and .paths["/api/library"].get' >/dev/null
+              "${check[@]}" "$DEPLOY_URL/api/swagger-ui/index.html" | grep -q 'swagger-ui-bundle.js'
+              "${check[@]}" "$DEPLOY_URL/api/frontend.html" | grep -q 'id="demo"'
+              test "$(curl --proto '=https' --silent --max-time 8 --output /dev/null --write-out '%{http_code}' "$DEPLOY_URL/api/library")" = 401
               echo "Deployed $GITHUB_SHA to $DEPLOY_URL"
               exit 0
             fi
