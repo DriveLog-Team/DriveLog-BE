@@ -4,6 +4,24 @@
 <p>운영 기준 주소 <code>https://35.216.33.209</code> · <a href="/api/swagger-ui.html">운영 Swagger</a> · <a href="/api/v3/api-docs">OpenAPI JSON</a>. API 경로는 모두 <code>/api/</code>로 시작한다.</p>
 <nav><a href="#private">개인 운행·동의·보관함</a><a href="#auth">연결</a><a href="#flow">호출 순서</a><a href="#list">전체 명세</a><a href="#state">오류·상태</a><a href="#scope">기획 범위</a></nav></header>
 <section id="private"><h2>개인 운행 시작과 동의</h2>
+<p><a href="#drive-timeline">차량 음성 표시 · 동승자 버튼 · 드라이브 타임라인 연동</a></p>
+<section id="drive-timeline"><h3>주행 중 표시하고 도착 후 함께 보기</h3>
+<p>기존 동의를 수정할 때 <code>useTripContext</code>와 <code>shareMarkedClips</code>를 생략하면 각각의 기존 선택이 유지된다. 처음 동의할 때 두 선택의 기본값은 false다. 장소를 이미 사용한 뒤 위치 동의를 명시적으로 철회하면 운행이 폐기된다.</p>
+<p>출발 시 팀 서버가 같은 주행에 참여할 계정과 출발 시각을 등록한다. 기존 소유자·탑승자 UUID를 사용하며, 같은 입력으로 재시도할 수 있다. 동승자는 기존 개인 운행 목록에서 배정된 주행을 연다.</p>
+<pre>POST /api/private-trips/departures  (운영자 토큰)
+{"sourceId":"주행 UUID","owner":"소유자 UUID","startedAt":"2026-11-13T05:00:00Z",
+ "occupants":[{"occupant":"소유자 UUID","under14":false},{"occupant":"동승자 UUID","under14":false}]}
+→ 200 · phase = DRIVING</pre>
+<p>폰은 버튼을 누른 시각, 차량은 음성 명령을 인식한 시각을 출발 기준 밀리초로 보낸다. 각 조작마다 새 UUID를 만들고 통신 재시도에는 같은 UUID와 본문을 쓴다. 성공한 음성 요청에만 “표시했어요”를 읽는다.</p>
+<pre>PUT /api/private-trips/{id}/marks/{markId}         (탑승자 개인 토큰)
+{"kind":"TAP","atMs":1920000}
+PUT /api/private-trips/{id}/voice-marks/{markId}   (탑승자 개인 토큰)
+{"command":"방금 거 저장해줘. 다 같이 웃는 데까지.","atMs":1930000}
+GET /api/private-trips/{id}/timeline               (탑승자 개인 토큰)
+GET /api/private-trips/{id}/marks/{markId}/clip    (탑승자 개인 토큰, video/mp4)</pre>
+<p>음성 명령은 “지금 순간 남겨줘”, “방금 거 저장해줘”, “방금 거 저장해줘. 다 같이 웃는 데까지.” 등을 지원한다. 인식되지 않은 명령은 422다. 인텐트가 이미 있으면 첫 경로에 VOICE 또는 VOICE_UNTIL_LAUGHTER를 보낸다. 차량에서는 이동 중 타임라인·재생을 숨긴다. 서버는 DRIVING, PENDING, UPLOAD 동안 운행당 최대 24개 표시를 받는다. 새 표시가 마감됐거나 같은 키로 다른 요청을 보내면 409다.</p>
+<p>도착 후 같은 sourceId·명단으로 아래의 주행 등록 API를 호출해 PENDING으로 전환한다. 기존 전원 동의와 업로드를 마치고 편집 작업을 요청한다. 동승자에게 표시 클립 재생을 허용하려면 각 승객과 지정 보호자가 동의 본문에 <code>"shareMarkedClips":true</code>를 추가한다. 소유자는 공유 동의 없이도 자기 편집본을 볼 수 있다. 선택적 장소명은 전원 위치 동의 후 기존 context API로 표시와 동일한 atMs의 이벤트 label을 전송한다.</p>
+<p>타임라인은 startedAt과 시간순 entries를 반환한다. 각 entry에는 mark.id·author·atMs·kind, place, state, title, clipUrl이 있다. 시각은 startedAt + atMs로 표시한다. MARKED는 초안 대기, CLIP_READY는 재생 가능, SHARING_DISABLED는 전원 공유 동의 대기, NO_CLIP은 안전한 클립이 없거나 최종 보관에서 선택되지 않은 표시다. clipUrl에 개인 인증을 보낸다. 보행자 제외 구간 또는 원본 범위 밖의 표시는 재생되지 않는다. 웃음 연장 요청은 가까운 웃음이 감지되면 그 끝까지, 감지되지 않으면 기본 구간을 사용한다. 음성이 있는 표시 클립의 제목·요약은 기존 Gemini 경로를 사용한다.</p></section>
 <p>팀 BFF는 로그인한 사용자별로 <code>POST /api/accounts</code>를 호출해 반환된 <code>accountId</code>와 <code>accessToken</code>을 서버에서 안전하게 보관한다. 이후에는 같은 자격증명을 사용한다. 사용자 요청의 계정 ID를 그대로 믿지 말고 로그인 세션에 연결한 개인 토큰을 선택한다. Swagger의 Authorize에서 운영자 작업은 operatorToken, 개인 작업은 personToken을 사용한다. 하나의 요청에 Bearer 헤더는 하나다.</p>
 <p>차량은 운행 UUID와 탑승자 명단, 정차 정보를 먼저 등록한다. 전원 동의가 끝나 UPLOAD가 되면 소유자 개인 토큰으로 전·후방 원본을 각각 전송한다.</p>
 <pre>POST /api/private-trips      (팀 서버)
