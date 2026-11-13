@@ -11,6 +11,14 @@
   {"occupant":"소유자 UUID","under14":false},
   {"occupant":"아동 UUID","under14":true,"guardian":"지정 보호자 UUID"}]}</pre>
 <p>신뢰된 등록 주체가 현장에서 확인한 좌석 순서·연령 구분·보호자 관계를 연결한다. 운행의 인원수와 연령 구분은 등록된 원본 명세와 일치해야 한다. 보호자 신분 확인은 등록 주체의 절차다. 응답의 tripId는 이후 모든 개인 운행 작업에 사용한다.</p>
+<h3 id="registration-retry">응답을 받지 못한 주행 등록 다시 보내기</h3>
+<p>팀 서버는 주행마다 <code>sourceId</code>를 한 번 발급하고 첫 전송 전에 등록 본문을 보관한다. 연결이 끊기거나 응답 시간이 초과되면 같은 운영자 Bearer 토큰 권한으로 위의 <code>POST /api/private-trips</code>에 보관한 본문을 다시 보낸다. 탑승자 배열 순서와 카메라 오프셋도 유지한다.</p>
+<table><thead><tr><th>요청</th><th>응답과 프론트 처리</th></tr></thead><tbody>
+<tr><td>최초 등록</td><td><code>200</code> · 반환된 <code>tripId</code>를 저장한다.</td></tr>
+<tr><td>같은 주행과 같은 등록 내용</td><td><code>200</code> · 기존 <code>tripId</code>와 현재 <code>phase</code>를 받는다. 해당 ID의 화면을 갱신한다. 이미 받은 동의는 유지된다.</td></tr>
+<tr><td>같은 ID에 다른 등록 내용</td><td><code>409</code> · 원래 보낸 소유자, 탑승자 명단·순서, <code>source</code> 값을 대조한다.</td></tr>
+</tbody></table>
+<p>소유자 개인 토큰으로 <code>GET /api/private-trips</code>를 호출하면 해당 <code>tripId</code>가 목록에 한 번만 나타난다.</p>
 <pre>GET /api/private-trips                            (각 개인)
 GET /api/private-trips/{id}                       (탑승자·지정 보호자)
 PUT /api/private-trips/{id}/consents/{occupant}/PASSENGER  (탑승자 본인)
