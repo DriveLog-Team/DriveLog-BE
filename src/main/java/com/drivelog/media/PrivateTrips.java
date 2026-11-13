@@ -27,15 +27,22 @@ class PrivateTrips {
     record Account(UUID accountId, String accessToken) {}
     record Seat(UUID occupant, boolean under14, UUID guardian) {}
     record Registration(UUID sourceId, UUID owner, List<Seat> occupants, Source source) {}
+    record Departure(UUID sourceId, UUID owner, List<Seat> occupants, Instant startedAt) {}
+    enum MarkKind { TAP, VOICE, VOICE_UNTIL_LAUGHTER }
+    record MarkInput(MarkKind kind, Long atMs) {}
+    record DriveMark(UUID id, UUID author, MarkKind kind, long atMs) {}
+    record TimelineEntry(DriveMark mark, String place, String state, String title, String clipUrl) {}
+    record Timeline(String tripId, Instant startedAt, String phase, List<TimelineEntry> entries) {}
     record Source(String gear, boolean stationary, String audioSource, long frontOffsetMs, long rearOffsetMs, boolean roadReviewed) {}
     enum Role { PASSENGER, GUARDIAN }
-    record Decision(Boolean extraction, Boolean geminiTranscript, Boolean useTripContext) {
+    record Decision(Boolean extraction, Boolean geminiTranscript, Boolean useTripContext, Boolean shareMarkedClips) {
+        Decision(Boolean extraction,Boolean geminiTranscript,Boolean useTripContext){this(extraction,geminiTranscript,useTripContext,null);}
         Decision(Boolean extraction, Boolean geminiTranscript){this(extraction,geminiTranscript,false);}
     }
     enum EventKind { LANDMARK, NEAR_ARRIVAL, ARRIVAL }
     record DriveEvent(long atMs, EventKind kind, String label) {}
     record DriveContext(String departure,String destination,List<DriveEvent> events) {}
-    record Receipt(Role role, UUID occupant, UUID actor, boolean extraction, boolean geminiTranscript, boolean useTripContext, String at) {}
+    record Receipt(Role role, UUID occupant, UUID actor, boolean extraction, boolean geminiTranscript, boolean useTripContext, String at, boolean shareMarkedClips) {}
     record Trip(String tripId, UUID owner, String phase, List<Seat> occupants, List<Receipt> receipts) {}
     record Selection(UUID jobId, String moment) {}
     record Item(String tripId, String title, long durationMs, String savedAt) {}
@@ -108,6 +115,13 @@ class PrivateTrips {
         if(id==null || !Files.isRegularFile(accounts.resolve(id.toString()))) throw new ResponseStatusException(BAD_REQUEST);
     }
     synchronized Trip register(Registration reg) throws IOException {
+        return register(reg,null);
+    }
+    synchronized Trip depart(Departure departure) throws IOException {
+        if(departure==null || departure.startedAt()==null) throw new ResponseStatusException(BAD_REQUEST);
+        return register(new Registration(departure.sourceId(),departure.owner(),departure.occupants(),null),departure.startedAt());
+    }
+    private Trip register(Registration reg, Instant startedAt) throws IOException {
         if(reg==null || reg.sourceId()==null || reg.occupants()==null || reg.occupants().isEmpty() || reg.occupants().size()>16) throw new ResponseStatusException(BAD_REQUEST);
         known(reg.owner());
         Set<UUID> people=new HashSet<>();
@@ -119,10 +133,24 @@ class PrivateTrips {
         }
         if(!people.contains(reg.owner()) || reg.occupants().stream().anyMatch(s -> s.under14() && reg.occupants().stream().anyMatch(child -> s.occupant().equals(child.guardian())))) throw new ResponseStatusException(BAD_REQUEST);
         String id="trip-"+reg.sourceId();
+        Source source=reg.source();
+        if(startedAt==null && (source==null || !"P".equals(source.gear()) || !source.stationary() || !source.roadReviewed()
+                || !List.of("front","rear").contains(Objects.toString(source.audioSource(),""))
+                || source.frontOffsetMs()<0 || source.rearOffsetMs()<0)) throw new ResponseStatusException(BAD_REQUEST);
         Path folder=dir(id);
         if(Files.isRegularFile(folder.resolve("trip.json"))) {
             ObjectNode prior=read(id);
             if(!reg.owner().toString().equals(access(prior).path("owner").asText()) || !access(prior).get("seats").equals(json.valueToTree(reg.occupants()))) throw new ResponseStatusException(CONFLICT);
+            if(startedAt!=null) {
+                if(!startedAt.toString().equals(access(prior).path("startedAt").asText())) throw new ResponseStatusException(CONFLICT);
+                return view(prior);
+            }
+            if("DRIVING".equals(phase(prior))) {
+                configureParked(prior,source);
+                access(prior).put("phase","PENDING");
+                store(prior);
+                return view(prior);
+            }
             if(access(prior).has("source")) {
                 Source registered=json.treeToValue(access(prior).get("source"),Source.class);
                 if(!registered.equals(reg.source())) throw new ResponseStatusException(CONFLICT);
@@ -130,24 +158,25 @@ class PrivateTrips {
             if("IMPORTING".equals(phase(prior))) finishImport(prior);
             return view(prior);
         }
-        Source source=reg.source();
-        if(source==null || !"P".equals(source.gear()) || !source.stationary() || !source.roadReviewed()
-                || !List.of("front","rear").contains(Objects.toString(source.audioSource(),""))
-                || source.frontOffsetMs()<0 || source.rearOffsetMs()<0) throw new ResponseStatusException(BAD_REQUEST);
         ObjectNode doc=json.createObjectNode(); doc.put("tripId",id);
-        doc.putObject("front").put("file","raw/front.mp4").put("offsetMs",source.frontOffsetMs());
-        doc.putObject("rear").put("file","raw/rear.mp4").put("offsetMs",source.rearOffsetMs());
-        doc.put("audioSource",source.audioSource()).put("recommendationMode","gleo-demo").put("gleoExcerptConsent",false);
-        doc.putObject("roadReview").put("complete",true);
-        doc.putObject("extraction").put("gear","P").put("stationary",true).put("occupantCount",people.size());
+        doc.putObject("extraction").put("occupantCount",people.size());
         ObjectNode a=doc.putObject("access");a.put("owner",reg.owner().toString()).put("phase","PENDING");
+        if(startedAt!=null) a.put("phase","DRIVING").put("startedAt",startedAt.toString());
+        else configureParked(doc,source);
         a.put("expiresAt",Instant.now().plusSeconds(86400).toString());
-        a.set("source",json.valueToTree(source));
         a.putObject("uploads");
         a.set("seats",json.valueToTree(reg.occupants()));a.putObject("receipts");
         refresh(doc);
         Files.createDirectories(folder);store(doc);
         return view(doc);
+    }
+    private void configureParked(ObjectNode doc,Source source) {
+        doc.putObject("front").put("file","raw/front.mp4").put("offsetMs",source.frontOffsetMs());
+        doc.putObject("rear").put("file","raw/rear.mp4").put("offsetMs",source.rearOffsetMs());
+        doc.put("audioSource",source.audioSource()).put("recommendationMode","gleo-demo").put("gleoExcerptConsent",false);
+        doc.putObject("roadReview").put("complete",true);
+        ((ObjectNode)doc.get("extraction")).put("gear","P").put("stationary",true);
+        access(doc).set("source",json.valueToTree(source));
     }
     private void finishImport(ObjectNode doc) throws IOException {
         String id=doc.get("tripId").asText();Path raw=dir(id).resolve("raw");
@@ -219,6 +248,78 @@ class PrivateTrips {
         if(seats(doc).stream().noneMatch(s->actor.equals(s.occupant()) || actor.equals(s.guardian()))) throw new ResponseStatusException(NOT_FOUND);
         cleanup(doc);return view(doc);
     }
+    private ObjectNode participantTrip(String id, UUID actor) throws IOException {
+        ObjectNode doc=read(id);
+        if(seats(doc).stream().noneMatch(s->actor.equals(s.occupant()))) throw new ResponseStatusException(NOT_FOUND);
+        if(Set.of("DISCARDING","DISCARDED").contains(phase(doc))) throw new ResponseStatusException(GONE);
+        return doc;
+    }
+    synchronized DriveMark mark(String id, UUID actor, UUID markId, MarkInput input) throws IOException {
+        ObjectNode doc=participantTrip(id,actor);
+        if(input==null || input.kind()==null || input.atMs()==null || input.atMs()<0 || input.atMs()>=86_400_000L)
+            throw new ResponseStatusException(BAD_REQUEST);
+        DriveMark mark=new DriveMark(markId,actor,input.kind(),input.atMs());
+        ObjectNode marks=doc.withObjectProperty("marks");
+        if(marks.has(markId.toString())) {
+            if(!mark.equals(json.treeToValue(marks.get(markId.toString()),DriveMark.class))) throw new ResponseStatusException(CONFLICT);
+            return mark;
+        }
+        if(!Set.of("DRIVING","PENDING","UPLOAD").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
+        if(marks.size()>=24) throw new ResponseStatusException(CONFLICT,"운행당 최대 24개");
+        marks.set(markId.toString(),json.valueToTree(mark));
+        store(doc);
+        return mark;
+    }
+    synchronized Timeline timeline(String id, UUID actor) throws IOException {
+        ObjectNode doc=participantTrip(id,actor);
+        boolean canPlay=canPlayMarked(doc,actor);
+        List<TimelineEntry> entries=new ArrayList<>();
+        for(JsonNode node:doc.path("marks")) {
+            DriveMark mark=json.treeToValue(node,DriveMark.class);
+            JsonNode clip=access(doc).path("markedClips").path(mark.id().toString());
+            String state="MARKED", title=null, url=null;
+            if(access(doc).has("draftVersion")) {
+                boolean available=clip.has("id") && (!"SAVED".equals(phase(doc)) ||
+                        clip.path("id").asText().equals(access(doc).path("selection").path("moment").asText()));
+                state=available?"CLIP_READY":"NO_CLIP";
+                if(available && !canPlay) state="SHARING_DISABLED";
+                if(available && canPlay) {
+                    title="SAVED".equals(phase(doc))?access(doc).path("item").path("title").asText():clip.path("title").asText();
+                    url="/api/private-trips/"+id+"/marks/"+mark.id()+"/clip";
+                }
+            }
+            String place=markedPlace(doc,mark);
+            entries.add(new TimelineEntry(mark,place,state,title,url));
+        }
+        entries.sort(Comparator.comparingLong((TimelineEntry e)->e.mark().atMs()).thenComparing(e->e.mark().id()));
+        Instant start=access(doc).has("startedAt")?Instant.parse(access(doc).get("startedAt").asText()):null;
+        return new Timeline(id,start,phase(doc),entries);
+    }
+    private String markedPlace(ObjectNode doc, DriveMark mark) {
+        for(JsonNode event:doc.path("driveContext").path("events"))
+            if(event.path("atMs").asLong()==mark.atMs()) return event.path("label").asString(null);
+        return access(doc).path("markPlaces").path(mark.id().toString()).asString(null);
+    }
+    private boolean canPlayMarked(ObjectNode doc,UUID actor) {
+        if(actor.toString().equals(access(doc).path("owner").asText())) return true;
+        var receipts=access(doc).path("receipts");
+        for(Seat seat:seats(doc)) {
+            if(!receipts.path(seat.occupant()+"/PASSENGER").path("shareMarkedClips").asBoolean(false)) return false;
+            if(seat.under14() && !receipts.path(seat.occupant()+"/GUARDIAN").path("shareMarkedClips").asBoolean(false)) return false;
+        }
+        return true;
+    }
+    synchronized Path markedClip(String id,UUID actor,UUID markId) throws IOException {
+        ObjectNode doc=participantTrip(id,actor);
+        if(!canPlayMarked(doc,actor)) throw new ResponseStatusException(FORBIDDEN);
+        JsonNode clip=access(doc).path("markedClips").path(markId.toString());
+        if(!clip.has("id") || !Set.of("READY","SAVED").contains(phase(doc))) throw new ResponseStatusException(NOT_FOUND);
+        if("SAVED".equals(phase(doc))) {
+            if(!clip.get("id").asText().equals(access(doc).path("selection").path("moment").asText())) throw new ResponseStatusException(NOT_FOUND);
+            return dir(id).resolve("saved.mp4");
+        }
+        return dir(id).resolve("work").resolve(access(doc).get("draftVersion").asText()).resolve(clip.get("id").asText()+".mp4");
+    }
     synchronized List<Trip> assigned(UUID actor) throws IOException {
         List<Trip> result=new ArrayList<>();
         try(var entries=Files.list(trips)) {
@@ -251,15 +352,23 @@ class PrivateTrips {
         if(!Set.of("PENDING","UPLOAD","READY","SAVED").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
         var receipts=(ObjectNode)access(doc).get("receipts");String key=occupant+"/"+role;
         boolean context=Boolean.TRUE.equals(d.useTripContext());
+        boolean priorShare=receipts.path(key).path("shareMarkedClips").asBoolean(false);
+        boolean share=yes && (d.shareMarkedClips()==null?priorShare:d.shareMarkedClips());
         if(yes && agreed(receipts.path(key))) {
-            if(receipts.path(key).path("useTripContext").asBoolean()==context) return view(doc);
+            if(receipts.path(key).path("useTripContext").asBoolean()==context) {
+                if(share!=priorShare) {
+                    ((ObjectNode)receipts.get(key)).put("shareMarkedClips",share).put("at",Instant.now().toString());
+                    store(doc);
+                }
+                return view(doc);
+            }
             if(!context && access(doc).path("usedContext").asBoolean()) {
-                receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),false,Instant.now().toString())));
+                receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),false,Instant.now().toString(),share)));
                 return discardContext(doc);
             }
             if(!Set.of("PENDING","UPLOAD").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
         }
-        receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),context,Instant.now().toString())));
+        receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),context,Instant.now().toString(),share)));
         boolean all=refresh(doc);
         access(doc).put("phase",yes?(all?(access(doc).has("uploads") && access(doc).get("uploads").size()<2?"UPLOAD":"READY"):"PENDING"):"DISCARDING");
         store(doc);cleanup(doc);return view(doc);
@@ -302,10 +411,19 @@ class PrivateTrips {
         if(!"READY".equals(phase(doc))) throw new ResponseStatusException(CONFLICT);
         if(!access(doc).has("draftVersion")) {
             JsonNode result=json.readTree(export.resolve("cards.json").toFile());
+            var markedClips=access(doc).putObject("markedClips");
             for(JsonNode card:result.path("cards")) {
                 if(!Files.isRegularFile(export.resolve("master-"+card.path("file").asText()))) throw new IOException("Protected clip missing");
+                for(JsonNode markId:card.path("markIds"))
+                    markedClips.putObject(markId.asText()).put("id",card.get("id").asText()).put("title",card.get("title").asText());
             }
             access(doc).put("draftVersion",export.getFileName().toString());
+            var places=access(doc).putObject("markPlaces");
+            for(JsonNode node:doc.path("marks")) {
+                DriveMark m=json.treeToValue(node,DriveMark.class);
+                String label=markedPlace(doc,m);
+                if(label!=null) places.put(m.id().toString(),label);
+            }
             doc.remove("driveContext");
             access(doc).put("expiresAt",Instant.now().plusSeconds(86400).toString());
             store(doc);
@@ -318,7 +436,7 @@ class PrivateTrips {
             for(Path entry:entries.toList()) {
                 if(!Files.isRegularFile(entry.resolve("trip.json"))) continue;
                 ObjectNode doc=read(entry.getFileName().toString());
-                if(Set.of("PENDING","UPLOAD","READY").contains(phase(doc)) && access(doc).has("expiresAt")
+                if(Set.of("DRIVING","PENDING","UPLOAD","READY").contains(phase(doc)) && access(doc).has("expiresAt")
                         && !Instant.parse(access(doc).get("expiresAt").asText()).isAfter(Instant.now())) {
                     access(doc).put("phase","DISCARDING");
                     doc.put("audioProcessingConsent",false).put("geminiTranscriptConsent",false);
@@ -367,7 +485,10 @@ class PrivateTrips {
         Path folder=dir(id);
         deleteTree(folder.resolve("raw"));deleteTree(folder.resolve("work"));
         doc.remove("driveContext");
-        if("DISCARDING".equals(phase)) {Files.deleteIfExists(folder.resolve("saved.mp4"));access(doc).remove("item");}
+        if("DISCARDING".equals(phase)) {
+            Files.deleteIfExists(folder.resolve("saved.mp4"));access(doc).remove("item");
+            doc.remove("marks");access(doc).remove("markedClips");access(doc).remove("markPlaces");
+        }
         access(doc).put("phase","SAVING".equals(phase)?"SAVED":"DISCARDED");
         store(doc);
     }

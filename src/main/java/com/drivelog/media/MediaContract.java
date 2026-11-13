@@ -29,7 +29,8 @@ public final class MediaContract {
     public record Card(String id, int group, long startMs, long endMs, String title, String summary,
             @Schema(description="로컬 의미 모델의 유사도 차이") Double score,
             @Schema(description="Gemini 추천 순번, 1부터 시작") Integer rank,
-            List<Cue> cues, Recommendation recommendation, SoundEvent soundEvent, PrivateTrips.DriveContext driveContext, String file) {}
+            List<Cue> cues, Recommendation recommendation, SoundEvent soundEvent, PrivateTrips.DriveContext driveContext,
+            @Schema(description="이 클립에 연결된 탑승자 표시 UUID") List<UUID> markIds, String file) {}
     public record SoundEvent(@Schema(allowableValues={"BABBLING","LAUGHTER"}) String kind, long startMs, long endMs, double confidence) {}
     @Schema(requiredProperties={"startMs","endMs","text"})
     public record Cue(@Schema(description="운행 시작 기준 밀리초") long startMs, long endMs, String text) {}

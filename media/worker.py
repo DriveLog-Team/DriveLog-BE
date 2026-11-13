@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import wave
 import gemini_demo
+from marked_moments import add_marked_cards
 import road_privacy
 import sound_events
 from file_hash import digest
@@ -395,8 +396,11 @@ def run(manifest, library, profile, edit_file=None):
                     add_surrounding_footage(card, cues, source_start, source_end, blocked, limit)
             else:
                 selected = MemoryRanker().select(cards) if cards else []
-            if len(selected)<3:
+            marks=list(spec.get("marks",{}).values())
+            events=[]
+            if len(selected)<3 or any(m["kind"]=="VOICE_UNTIL_LAUGHTER" for m in marks):
                 events=sound_events.detect(wav,primary["offsetMs"],blocked,lambda:require_audio_consent(manifest))
+            if len(selected)<3:
                 last_id=max((int(c["id"].split("-")[1]) for c in cards),default=0)
                 sound_events.add_cards(selected,events,last_id,limit)
                 for card in selected:
@@ -405,6 +409,15 @@ def run(manifest, library, profile, edit_file=None):
                             end=primary["offsetMs"]+raw.getnframes()*1000//raw.getframerate()
                         others=[(c["startMs"],c["endMs"]) for c in selected if c is not card]
                         add_surrounding_footage(card,cues,primary["offsetMs"],end,blocked+others,limit)
+            if marks:
+                with wave.open(str(wav),"rb") as raw:
+                    start=primary["offsetMs"]
+                    end=start+raw.getnframes()*1000//raw.getframerate()
+                marked=add_marked_cards(selected,marks,cues,events,start,end,blocked,limit)
+                spoken=[card for card in marked if card["cues"]]
+                if mode=="gleo-demo":
+                    for i in range(0,len(spoken),3):
+                        gemini_demo.write_summaries(spoken[i:i+3],authorize_gemini)
         attach_context(selected,spec.get("driveContext"))
         staging = wd/"release"
         staging.mkdir()

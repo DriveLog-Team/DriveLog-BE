@@ -32,6 +32,51 @@ class PrivateTripController {
     @Operation(operationId="issuePersonalAccount",summary="인증한 사용자에게 개인 자격증명 최초 발급",description="신뢰된 팀 서버가 발급하고 자기 사용자 계정에 연결한다. accessToken은 최초 한 번만 반환한다.",security=@SecurityRequirement(name="operatorToken"))
     PrivateTrips.Account issue(HttpServletRequest req)throws IOException {media.authorize(req);return store.issue();}
 
+    @PostMapping("/private-trips/departures")
+    @ApiResponse(responseCode="200",description="현재 운행과 등록된 탑승자",useReturnTypeSchema=true)
+    @Operation(operationId="departTrip",summary="출발 시 주행 시계와 참여자 연결",description="startedAt은 차량의 출발 UTC 시각이다. 같은 UUID·시각·명단으로 재시도 가능. 도착 시 같은 sourceId로 기존 운행 등록 API를 호출한다.",security=@SecurityRequirement(name="operatorToken"))
+    PrivateTrips.Trip depart(@RequestBody PrivateTrips.Departure body,HttpServletRequest req)throws IOException {
+        media.authorize(req);
+        return store.depart(body);
+    }
+
+    record VoiceMark(Long atMs,String command) {}
+    @PutMapping("/private-trips/{id}/voice-marks/{markId}")
+    @ApiResponse(responseCode="200",description="저장된 표시. 차량은 ‘표시했어요’로 응답할 수 있다.",useReturnTypeSchema=true)
+    @ApiResponse(responseCode="422",description="지원하지 않는 음성 명령",content=@Content)
+    @Operation(operationId="markByVoice",summary="차량에서 인식한 한국어 저장 명령으로 순간 표시",description="음성 인식 결과만 전송한다. 명령 원문은 보관하지 않는다.",security=@SecurityRequirement(name="personToken"))
+    PrivateTrips.DriveMark voice(@PathVariable String id,@PathVariable UUID markId,@RequestBody VoiceMark body,HttpServletRequest req)throws IOException {
+        UUID actor=store.person(req);
+        if(body==null || body.command()==null || body.command().length()>160)
+            throw new org.springframework.web.server.ResponseStatusException(HttpStatus.BAD_REQUEST);
+        String command=body.command().replaceAll("[\\s.,!?~]","");
+        var match=java.util.regex.Pattern.compile("(?:방금(?:거|꺼|장면|순간)?|지금(?:이?순간|장면)?|이(?:순간|장면))?(?:저장해(?:줘|주세요)?|남겨(?:줘|주세요)?|표시해(?:줘|주세요)?)(다같이웃는데까지|웃는데까지|웃을때까지)?").matcher(command);
+        if(!match.matches()) throw new org.springframework.web.server.ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY);
+        var kind=match.group(1)==null?PrivateTrips.MarkKind.VOICE:PrivateTrips.MarkKind.VOICE_UNTIL_LAUGHTER;
+        return store.mark(id,actor,markId,new PrivateTrips.MarkInput(kind,body.atMs()));
+    }
+
+    @PutMapping("/private-trips/{id}/marks/{markId}")
+    @ApiResponse(responseCode="200",description="같은 키·입력은 같은 표시 반환",useReturnTypeSchema=true)
+    @ApiResponse(responseCode="409",description="키 충돌, 마감 또는 표시 한도 도달",content=@Content)
+    @Operation(operationId="markDriveMoment",summary="탑승자 폰 버튼 또는 차량 음성 인텐트로 순간 표시",description="atMs는 주행 시작부터의 밀리초다. actor는 개인 토큰에서 결정한다.",security=@SecurityRequirement(name="personToken"))
+    PrivateTrips.DriveMark mark(@PathVariable String id,@PathVariable UUID markId,@RequestBody PrivateTrips.MarkInput body,HttpServletRequest req)throws IOException {
+        return store.mark(id,store.person(req),markId,body);
+    }
+    @GetMapping("/private-trips/{id}/timeline")
+    @ApiResponse(responseCode="200",description="시간순 표시, 선택적 장소명 및 재생 주소",useReturnTypeSchema=true)
+    @Operation(operationId="getDriveTimeline",summary="같은 주행에 참여한 탑승자의 타임라인",security=@SecurityRequirement(name="personToken"))
+    PrivateTrips.Timeline timeline(@PathVariable String id,HttpServletRequest req)throws IOException {
+        return store.timeline(id,store.person(req));
+    }
+    @GetMapping(value="/private-trips/{id}/marks/{markId}/clip",produces="video/mp4")
+    @ApiResponse(responseCode="200",description="보호 처리된 표시 클립",content=@Content(mediaType="video/mp4",schema=@Schema(type="string",format="binary")))
+    @ApiResponse(responseCode="206",description="부분 영상",content=@Content(mediaType="video/mp4",schema=@Schema(type="string",format="binary")))
+    @Operation(operationId="getMarkedClip",summary="표시된 순간의 보호 클립 재생",description="소유자 또는 전원 공유 동의를 받은 같은 운행 탑승자.",security=@SecurityRequirement(name="personToken"))
+    FileSystemResource markedClip(@PathVariable String id,@PathVariable UUID markId,HttpServletRequest req)throws IOException {
+        return new FileSystemResource(store.markedClip(id,store.person(req),markId));
+    }
+
     @PostMapping("/private-trips")
     @ApiResponse(responseCode="200",description="등록된 운행과 동의 상태",useReturnTypeSchema=true)
     @Operation(operationId="registerPrivateTrip",summary="파일 없이 운행·탑승자·보호자 등록",description="sourceId는 차량이 생성한 운행 UUID다. source에 정차 상태·카메라 시각을 보낸다. 같은 sourceId와 명단으로 재요청할 수 있다. 최초 동의는 모두 미응답.",security=@SecurityRequirement(name="operatorToken"))
