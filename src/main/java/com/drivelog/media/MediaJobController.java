@@ -286,7 +286,7 @@ public class MediaJobController {
             throw error(HttpStatus.CONFLICT);
     }
     @GetMapping("/{id}")
-    @Operation(operationId="getMediaJob", summary="작업 상태와 추천 카드 조회", description="READY이면 result.privacy에서 전·후방 검사 통계와 제외 구간(ms)을 확인한다. 검사 또는 렌더 실패는 FAILED이고 MP4를 제공하지 않는다.")
+    @Operation(operationId="getMediaJob", summary="작업 상태와 추천 카드 조회", description="서버 재시작 후 기존 jobId로 조회한다. 중단된 작업은 재개하며 외부 AI 처리 여부가 불명확하면 FAILED로 종료될 수 있다. READY이면 result.privacy에서 전·후방 검사 통계와 제외 구간(ms)을 확인한다. 검사 또는 렌더 실패는 FAILED이고 MP4를 제공하지 않는다.")
     @ApiResponse(responseCode="200", description="작업 상태. 후보 0개도 READY로 완료될 수 있다.", content=@Content(schema=@Schema(implementation=MediaContract.Status.class)))
     @ApiResponse(responseCode="404", description="등록되지 않은 작업", content=@Content)
     public ResponseEntity<?> status(@PathVariable UUID id,HttpServletRequest req) throws IOException {

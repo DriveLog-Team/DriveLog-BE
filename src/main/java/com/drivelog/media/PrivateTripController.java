@@ -85,10 +85,14 @@ class PrivateTripController {
     }
     @PutMapping(value="/private-trips/{id}/media/{side}",consumes="video/mp4")
     @Operation(operationId="uploadConsentedTrack",summary="UPLOAD 상태에서 소유자가 전방 또는 후방 MP4 전송",
-            description="side는 front 또는 rear. Content-Length와 X-Content-SHA256(소문자 hex)이 필요하다. 두 파일이 확인되면 READY.",
+            description="side는 front 또는 rear. Content-Length와 X-Content-SHA256(소문자 hex)이 필요하다. 각 파일은 최대 8 GiB. 영상 스트림과 지정한 쪽 오디오를 검사한다. 두 파일 수락 시 READY. 편집 시작 전 같은 side만 교체할 수 있으며 검증 실패 시 기존 파일을 유지한다.",
             security=@SecurityRequirement(name="personToken"))
     @io.swagger.v3.oas.annotations.parameters.RequestBody(required=true,content=@Content(mediaType="video/mp4",schema=@Schema(type="string",format="binary")))
     @ApiResponse(responseCode="200",description="업로드 반영 후 운행 상태",useReturnTypeSchema=true)
+    @ApiResponse(responseCode="400",description="길이 또는 SHA-256 불일치",content=@Content)
+    @ApiResponse(responseCode="409",description="같은 트랙 전송 중, 편집 진행 또는 초안 확정",content=@Content)
+    @ApiResponse(responseCode="422",description="읽을 수 없는 영상·지정 오디오 없음·규격 초과",content=@Content)
+    @ApiResponse(responseCode="507",description="다른 업로드 예약과 편집 여유를 제외한 디스크 용량 부족",content=@Content)
     PrivateTrips.Trip upload(@PathVariable String id,@PathVariable String side,@RequestHeader("X-Content-SHA256") String sha,HttpServletRequest req) throws IOException {
         return store.upload(id,store.person(req),side,sha,req.getContentLengthLong(),req.getInputStream());
     }
@@ -117,7 +121,8 @@ class PrivateTripController {
     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode="409",description="작업 진행 중 또는 확정 대상 충돌",content=@io.swagger.v3.oas.annotations.media.Content)
     @PostMapping("/private-trips/{id}/finalize")
     @ApiResponse(responseCode="200",description="선택본 저장과 원본 정리 후 운행 상태",useReturnTypeSchema=true)
-    @Operation(operationId="finalizeTrip",summary="선택한 편집본을 개인 보관함에 저장하고 운행 원본 파기",description="READY인 작업에서 jobId와 moment를 지정한다. 같은 선택으로 재호출 가능. SAVED는 원본·중간물 삭제 완료를 뜻한다.",security=@SecurityRequirement(name="personToken"))
+    @Operation(operationId="finalizeTrip",summary="선택한 편집본을 개인 보관함에 저장하고 운행 원본 파기",description="READY인 작업에서 jobId와 moment를 지정한다. 같은 선택으로 재호출 가능. 운영에서 SAVED는 선택본 백업과 원본·중간물 삭제 완료를 뜻한다. 백업 장애 시 같은 선택으로 재시도한다.",security=@SecurityRequirement(name="personToken"))
+    @ApiResponse(responseCode="503",description="보관함 백업 일시 실패. 같은 선택으로 재시도",content=@Content)
     PrivateTrips.Trip finish(@PathVariable String id,@RequestBody PrivateTrips.Selection body,HttpServletRequest req)throws IOException {
         return store.finish(id,store.person(req),body,media,req);
     }
