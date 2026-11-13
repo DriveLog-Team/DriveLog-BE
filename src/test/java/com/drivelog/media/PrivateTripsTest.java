@@ -106,13 +106,32 @@ class PrivateTripsTest {
         String badSha = HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(invalid));
         assertThatThrownBy(() -> store.upload(id,owner,"front",badSha,invalid.length,new java.io.ByteArrayInputStream(invalid)))
                 .isInstanceOfSatisfying(ResponseStatusException.class,e -> assertThat(e.getStatusCode().value()).isEqualTo(422));
-        assertThat(store.upload(id,owner,"front",sha,bytes.length,new java.io.ByteArrayInputStream(bytes)).phase()).isEqualTo("UPLOAD");
+        // During the first body read the entire request is reserved, even for a second trip.
+        var reservationProbe=new java.io.ByteArrayInputStream(bytes) {
+            @Override public int read(byte[] dst,int start,int len) {
+                synchronized(store) {
+                    if (available()==bytes.length) {
+                        assertThatThrownBy(() -> store.checkSpace(PrivateTrips.EDIT_HEADROOM+bytes.length,1))
+                            .isInstanceOfSatisfying(ResponseStatusException.class,e -> assertThat(e.getStatusCode().value()).isEqualTo(507));
+                    }
+                }
+                return super.read(dst,start,len);
+            }
+        };
+        assertThat(store.upload(id,owner,"front",sha,bytes.length,reservationProbe).phase()).isEqualTo("UPLOAD");
         assertThat(store.upload(id,owner,"rear",sha,bytes.length,new java.io.ByteArrayInputStream(bytes)).phase()).isEqualTo("READY");
+        byte[] alternate=Arrays.copyOf(bytes,bytes.length+8);
+        // Append a legal empty MP4 free box to change only the digest.
+        System.arraycopy(new byte[]{0,0,0,8,'f','r','e','e'},0,alternate,bytes.length,8);
+        String altSha=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(alternate));
+        assertThat(store.upload(id,owner,"front",altSha,alternate.length,new java.io.ByteArrayInputStream(alternate)).phase()).isEqualTo("READY");
+        assertThatThrownBy(() -> store.upload(id,owner,"front",badSha,invalid.length,new java.io.ByteArrayInputStream(invalid)))
+            .isInstanceOfSatisfying(ResponseStatusException.class,e -> assertThat(e.getStatusCode().value()).isEqualTo(422));
         Path raw = library.resolve("private/trips/"+id+"/raw");
         Files.writeString(raw.resolve("upload-crash.part"),"partial");
         store.recover();
         assertThat(raw.resolve("upload-crash.part")).doesNotExist();
-        assertThat(raw.resolve("front.mp4")).exists();
+        assertThat(raw.resolve("front-"+altSha+".mp4")).hasBinaryContent(alternate);
         assertThatThrownBy(() -> store.checkSpace(PrivateTrips.EDIT_HEADROOM+100,101))
             .isInstanceOfSatisfying(ResponseStatusException.class,e -> assertThat(e.getStatusCode().value()).isEqualTo(507));
         var input=store.input(id,owner);

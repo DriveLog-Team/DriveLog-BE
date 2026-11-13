@@ -102,7 +102,11 @@ class PrivateTrips {
                     }
                 }
                 if(access(doc).has("draftVersion")) deleteTree(entry.resolve("raw"));
-                cleanup(doc);
+                try { cleanup(doc); }
+                catch (ResponseStatusException e) {
+                    if (e.getStatusCode()!=SERVICE_UNAVAILABLE) throw e;
+                    org.slf4j.LoggerFactory.getLogger(getClass()).warn("Vault recovery deferred");
+                }
             }
         }
     }

@@ -18,6 +18,10 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+      - name: Install video probe for upload tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
       - run: mvn --batch-mode --no-transfer-progress verify
       - run: python3 -m unittest discover -s media -p 'test_*.py' -v
       - name: Check Linux speech and video runtime
