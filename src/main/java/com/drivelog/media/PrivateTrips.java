@@ -48,6 +48,23 @@ class PrivateTrips {
     record Item(String tripId, String title, long durationMs, String savedAt) {}
 
     private final JsonMapper json=JsonMapper.builder().build();
+    @Value("${media.vault-bucket:}") private String vaultBucket="";
+    @Value("${media.worker:media/worker.py}") private Path workerScript;
+    @Value("${media.python:python3}") private String vaultPython;
+    private void vault(String command,ObjectNode doc) throws IOException {
+        if (vaultBucket.isBlank()) return;
+        Process proc=new ProcessBuilder(vaultPython,workerScript.resolveSibling("vault.py").toString(),command,
+                vaultBucket,accounts.getParent().toString(),doc.get("tripId").asText())
+                .redirectError(ProcessBuilder.Redirect.INHERIT).start();
+        try {
+            try (var body=proc.getOutputStream()) { json.writeValue(body,doc); }
+            if (!proc.waitFor(100,java.util.concurrent.TimeUnit.SECONDS) || proc.exitValue()!=0)
+                throw new ResponseStatusException(SERVICE_UNAVAILABLE,"Vault temporarily unavailable");
+        } catch(InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Vault operation interrupted",e);
+        } finally { if (proc.isAlive()) proc.destroyForcibly(); }
+    }
     private final SecureRandom random=new SecureRandom();
     private final Path accounts, inbox, trips;
     private final Map<String,Integer> workers=new HashMap<>();
@@ -402,6 +419,7 @@ class PrivateTrips {
             if(receipts.path(key).path("useTripContext").asBoolean()==context) {
                 if(share!=priorShare) {
                     ((ObjectNode)receipts.get(key)).put("shareMarkedClips",share).put("at",Instant.now().toString());
+                    if ("SAVED".equals(phase(doc))) vault("save",doc);
                     store(doc);
                 }
                 return view(doc);
@@ -486,6 +504,11 @@ class PrivateTrips {
                     doc.put("audioProcessingConsent",false).put("geminiTranscriptConsent",false);
                     store(doc);
                 }
+                if ("SAVED".equals(phase(doc)) && !vaultBucket.isBlank() && !access(doc).path("vaultSynced").asBoolean()) {
+                    vault("save",doc);
+                    access(doc).put("vaultSynced",true);
+                    store(doc);
+                }
                 cleanup(doc);
             }
         }
@@ -536,6 +559,12 @@ class PrivateTrips {
         String id=doc.get("tripId").asText(),phase=phase(doc);
         if(workers.containsKey(id) || !Set.of("SAVING","DISCARDING").contains(phase)) return;
         Path folder=dir(id);
+        if ("SAVING".equals(phase)) {
+            vault("save",doc);
+            if (!vaultBucket.isBlank()) access(doc).put("vaultSynced",true);
+        } else if (access(doc).has("item")) {
+            vault("revoke",doc);
+        }
         deleteTree(folder.resolve("raw"));deleteTree(folder.resolve("work"));deleteTree(folder.resolve("jobs"));
         doc.remove("driveContext");
         if("DISCARDING".equals(phase)) {
