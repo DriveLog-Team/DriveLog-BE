@@ -44,6 +44,10 @@ class PrivateTripsTest {
         var sourceInfo=new PrivateTrips.Source("P",true,"front",0,0,true);
         var request=new PrivateTrips.Registration(source,owner,List.of(new PrivateTrips.Seat(owner,false,null),new PrivateTrips.Seat(child,true,guardian)),sourceInfo);
         String id=store.register(request).tripId();
+        assertThat(store.register(request).tripId()).isEqualTo(id);
+        var changed=new PrivateTrips.Source("P",true,"front",0,1000,true);
+        assertThatThrownBy(()->store.register(new PrivateTrips.Registration(source,owner,request.occupants(),changed)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,e->assertThat(e.getStatusCode().value()).isEqualTo(409));
         byte[] bytes="video".getBytes();
         String sha=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
         assertThatThrownBy(()->store.upload(id,owner,"front",sha,bytes.length,new java.io.ByteArrayInputStream(bytes))).isInstanceOf(ResponseStatusException.class);

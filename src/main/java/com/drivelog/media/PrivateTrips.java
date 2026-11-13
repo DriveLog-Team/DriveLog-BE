@@ -123,7 +123,10 @@ class PrivateTrips {
         if(Files.isRegularFile(folder.resolve("trip.json"))) {
             ObjectNode prior=read(id);
             if(!reg.owner().toString().equals(access(prior).path("owner").asText()) || !access(prior).get("seats").equals(json.valueToTree(reg.occupants()))) throw new ResponseStatusException(CONFLICT);
-            if(access(prior).has("source") && !access(prior).get("source").equals(json.valueToTree(reg.source()))) throw new ResponseStatusException(CONFLICT);
+            if(access(prior).has("source")) {
+                Source registered=json.treeToValue(access(prior).get("source"),Source.class);
+                if(!registered.equals(reg.source())) throw new ResponseStatusException(CONFLICT);
+            }
             if("IMPORTING".equals(phase(prior))) finishImport(prior);
             return view(prior);
         }
