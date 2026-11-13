@@ -192,20 +192,26 @@ class PrivateTrips {
                 || !Set.of("UPLOAD","READY").contains(phase(doc))) throw new ResponseStatusException(FORBIDDEN);
         return doc;
     }
+    private final Set<String> editing = new HashSet<>();
+    private final Set<String> uploading = new HashSet<>();
+
     Trip upload(String id, UUID actor, String side, String digest, long length, InputStream bytes) throws IOException {
         long limit=8L*1024*1024*1024;
         Path raw=dir(id).resolve("raw"), temp;
+        String key=id+"/"+side;
+        boolean requireAudio;
         synchronized(this) {
             ObjectNode doc=uploadAllowed(id,actor,side,digest);
             String prior=access(doc).get("uploads").path(side).asText("");
-            if(!prior.isEmpty()) {
-                if(!prior.equals(digest)) throw new ResponseStatusException(CONFLICT);
-                return view(doc);
-            }
+            if (access(doc).has("draftVersion")) throw new ResponseStatusException(CONFLICT);
+            if (uploading.contains(key) || editing.contains(id)) throw new ResponseStatusException(CONFLICT);
+            if (prior.equals(digest) && access(doc).path("validated").path(side).asBoolean()) return view(doc);
+            requireAudio=side.equals(doc.path("audioSource").asText());
             if(length<=0 || length>limit) throw new ResponseStatusException(BAD_REQUEST);
             Files.createDirectories(raw);
             if(Files.getFileStore(raw).getUsableSpace()-length<2_000_000_000L) throw new ResponseStatusException(INSUFFICIENT_STORAGE);
             temp=Files.createTempFile(raw,"upload-",".part");
+            uploading.add(key);
             started(id);
         }
         try {
@@ -222,17 +228,25 @@ class PrivateTrips {
                 }
             }
             if(total!=length || !HexFormat.of().formatHex(sha.digest()).equals(digest)) throw new ResponseStatusException(BAD_REQUEST);
+            VideoProbe.validate(temp,requireAudio);
             synchronized(this) {
                 ObjectNode doc=uploadAllowed(id,actor,side,digest);
                 var uploads=(ObjectNode)access(doc).get("uploads");
-                if(uploads.has(side) && !digest.equals(uploads.path(side).asText())) throw new ResponseStatusException(CONFLICT);
-                Files.move(temp,raw.resolve(side+".mp4"),ATOMIC_MOVE,REPLACE_EXISTING);
+                Path previous = dir(id).resolve(doc.path(side).path("file").asText());
+                Path target = uploads.has(side) ? raw.resolve(side+"-"+digest+".mp4") : raw.resolve(side+".mp4");
+                Files.move(temp,target,ATOMIC_MOVE,REPLACE_EXISTING);
+                ((ObjectNode)doc.get(side)).put("file","raw/"+target.getFileName());
+                access(doc).withObjectProperty("validated").put(side,true);
                 uploads.put(side,digest);
                 if(uploads.has("front") && uploads.has("rear")) access(doc).put("phase","READY");
-                store(doc);return view(doc);
+                store(doc);
+                if (!previous.equals(target)) Files.deleteIfExists(previous);
+                return view(doc);
             }
         } finally {
-            try {Files.deleteIfExists(temp);} finally {stopped(id);}
+            try {Files.deleteIfExists(temp);} finally {
+                synchronized (this) { uploading.remove(key); stopped(id); }
+            }
         }
     }
     private List<Seat> seats(ObjectNode doc) {
@@ -446,6 +460,15 @@ class PrivateTrips {
                 cleanup(doc);
             }
         }
+    }
+    synchronized void startEdit(String id) {
+        if (uploading.contains(id+"/front") || uploading.contains(id+"/rear")) throw new ResponseStatusException(CONFLICT);
+        editing.add(id);
+        started(id);
+    }
+    synchronized void stopEdit(String id) throws IOException {
+        stopped(id);
+        if (!workers.containsKey(id)) editing.remove(id);
     }
     synchronized void started(String id){workers.merge(id,1,Integer::sum);}
     synchronized void stopped(String id) throws IOException {

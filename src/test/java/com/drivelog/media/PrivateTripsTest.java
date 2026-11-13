@@ -38,7 +38,7 @@ class PrivateTripsTest {
         for(var actor:List.of(owner,child)) store.decide(id,actor,PrivateTrips.Role.PASSENGER,actor,yes);
         store.decide(id,child,PrivateTrips.Role.GUARDIAN,guardian,new PrivateTrips.Decision(true,true,true,false));
         store.attachContext(id,owner,new PrivateTrips.DriveContext(null,null,List.of(new PrivateTrips.DriveEvent(2000,PrivateTrips.EventKind.LANDMARK,"바다"))));
-        byte[] bytes="fixture".getBytes();
+        byte[] bytes=Files.readAllBytes(Path.of("src/test/resources/media/short.mp4"));
         String sha=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
         for(String side:List.of("front","rear")) store.upload(id,owner,side,sha,bytes.length,new java.io.ByteArrayInputStream(bytes));
         Path export=Files.createDirectory(store.work(id).resolve("version"));
@@ -89,7 +89,7 @@ class PrivateTripsTest {
         var changed=new PrivateTrips.Source("P",true,"front",0,1000,true);
         assertThatThrownBy(()->store.register(new PrivateTrips.Registration(source,owner,request.occupants(),changed)))
                 .isInstanceOfSatisfying(ResponseStatusException.class,e->assertThat(e.getStatusCode().value()).isEqualTo(409));
-        byte[] bytes="video".getBytes();
+        byte[] bytes=Files.readAllBytes(Path.of("src/test/resources/media/short.mp4"));
         String sha=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
         assertThatThrownBy(()->store.upload(id,owner,"front",sha,bytes.length,new java.io.ByteArrayInputStream(bytes))).isInstanceOf(ResponseStatusException.class);
         assertThat(library.resolve("private/trips/"+id+"/raw")).doesNotExist();
@@ -102,6 +102,10 @@ class PrivateTripsTest {
         assertThatThrownBy(()->store.upload(id,child,"front",sha,bytes.length,new java.io.ByteArrayInputStream(bytes))).isInstanceOf(ResponseStatusException.class);
         assertThatThrownBy(()->store.upload(id,owner,"front","0".repeat(64),bytes.length,new java.io.ByteArrayInputStream(bytes))).isInstanceOf(ResponseStatusException.class);
         assertThat(library.resolve("private/trips/"+id+"/raw/front.mp4")).doesNotExist();
+        byte[] invalid = "not a video".getBytes();
+        String badSha = HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(invalid));
+        assertThatThrownBy(() -> store.upload(id,owner,"front",badSha,invalid.length,new java.io.ByteArrayInputStream(invalid)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,e -> assertThat(e.getStatusCode().value()).isEqualTo(422));
         assertThat(store.upload(id,owner,"front",sha,bytes.length,new java.io.ByteArrayInputStream(bytes)).phase()).isEqualTo("UPLOAD");
         assertThat(store.upload(id,owner,"rear",sha,bytes.length,new java.io.ByteArrayInputStream(bytes)).phase()).isEqualTo("READY");
         var input=store.input(id,owner);

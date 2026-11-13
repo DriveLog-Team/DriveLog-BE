@@ -129,15 +129,15 @@ public class MediaJobController {
         }
         UUID id = UUID.randomUUID();
         Job job = new Job(id,input.tripId(),input.profile(),"QUEUED",file,null,manifest.path("roadReview"));
+        if(personal) privateTrips.startEdit(job.tripId());
         synchronized(jobs) {
             if (jobs.size() >= 64) jobs.values().stream().filter(j -> !Set.of("RUNNING","QUEUED").contains(j.state()))
                     .findFirst().ifPresent(j -> jobs.remove(j.id()));
             jobs.put(id,job);
         }
         String revision = baseVersion;
-        if(personal) privateTrips.started(job.tripId());
         try { runner.execute(() -> process(job,input.edit(),revision)); }
-        catch (RejectedExecutionException e) { if(personal) privateTrips.stopped(job.tripId()); jobs.remove(id); throw error(HttpStatus.TOO_MANY_REQUESTS); }
+        catch (RejectedExecutionException e) { if(personal) privateTrips.stopEdit(job.tripId()); jobs.remove(id); throw error(HttpStatus.TOO_MANY_REQUESTS); }
         return ResponseEntity.accepted().cacheControl(CacheControl.noStore()).body(Map.of("jobId",id));
     }
 
@@ -181,7 +181,7 @@ public class MediaJobController {
             }
             if (editPath!=null) try { Files.deleteIfExists(editPath); } catch (IOException ignored) {}
             synchronized(privateTrips) {
-                if(PrivateTrips.managed(job.tripId())) try { privateTrips.stopped(job.tripId()); }
+                if(PrivateTrips.managed(job.tripId())) try { privateTrips.stopEdit(job.tripId()); }
                 catch(IOException e) { org.slf4j.LoggerFactory.getLogger(getClass()).error("Pending trip cleanup",e); }
                 if(completed!=null) update(job,"READY",completed);
             }
