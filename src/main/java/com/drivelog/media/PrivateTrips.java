@@ -63,6 +63,18 @@ class PrivateTrips {
             for(Path entry:entries.toList()) {
                 if (!Files.isRegularFile(entry.resolve("trip.json"))) continue;
                 ObjectNode doc=read(entry.getFileName().toString());
+                Path raw=entry.resolve("raw");
+                if (Files.isDirectory(raw) && access(doc).has("uploads")) {
+                    try (var files=Files.list(raw)) {
+                        for (Path file:files.toList()) {
+                            String name=file.getFileName().toString();
+                            boolean orphan=name.matches("(front|rear)(-[a-f0-9]{64})?[.]mp4")
+                                    && java.util.stream.Stream.of("front","rear").noneMatch(side ->
+                                        access(doc).path("uploads").has(side) && ("raw/"+name).equals(doc.path(side).path("file").asText()));
+                            if (orphan || (name.startsWith("upload-") && name.endsWith(".part"))) Files.delete(file);
+                        }
+                    }
+                }
                 if ("IMPORTING".equals(phase(doc))) finishImport(doc);
                 if(!access(doc).has("draftVersion") && Set.of("READY","UPLOAD","PENDING").contains(phase(doc))) deleteTree(entry.resolve("work"));
                 if(access(doc).has("draftVersion")) deleteTree(entry.resolve("raw"));
@@ -192,6 +204,13 @@ class PrivateTrips {
                 || !Set.of("UPLOAD","READY").contains(phase(doc))) throw new ResponseStatusException(FORBIDDEN);
         return doc;
     }
+    private long reservedUploadBytes;
+    static final long EDIT_HEADROOM = 2_000_000_000L;
+
+    synchronized void checkSpace(long available, long requested) {
+        if (available - EDIT_HEADROOM - reservedUploadBytes < requested)
+            throw new ResponseStatusException(INSUFFICIENT_STORAGE);
+    }
     private final Set<String> editing = new HashSet<>();
     private final Set<String> uploading = new HashSet<>();
 
@@ -200,6 +219,7 @@ class PrivateTrips {
         Path raw=dir(id).resolve("raw"), temp;
         String key=id+"/"+side;
         boolean requireAudio;
+        long remaining=length;
         synchronized(this) {
             ObjectNode doc=uploadAllowed(id,actor,side,digest);
             String prior=access(doc).get("uploads").path(side).asText("");
@@ -209,8 +229,9 @@ class PrivateTrips {
             requireAudio=side.equals(doc.path("audioSource").asText());
             if(length<=0 || length>limit) throw new ResponseStatusException(BAD_REQUEST);
             Files.createDirectories(raw);
-            if(Files.getFileStore(raw).getUsableSpace()-length<2_000_000_000L) throw new ResponseStatusException(INSUFFICIENT_STORAGE);
+            checkSpace(Files.getFileStore(raw).getUsableSpace(),length);
             temp=Files.createTempFile(raw,"upload-",".part");
+            reservedUploadBytes+=length;
             uploading.add(key);
             started(id);
         }
@@ -225,6 +246,7 @@ class PrivateTrips {
                     if(total>length) throw new ResponseStatusException(BAD_REQUEST);
                     synchronized(this){uploadAllowed(id,actor,side,digest);}
                     sha.update(buffer,0,n);output.write(buffer,0,n);
+                    synchronized(this) { reservedUploadBytes-=n; remaining-=n; }
                 }
             }
             if(total!=length || !HexFormat.of().formatHex(sha.digest()).equals(digest)) throw new ResponseStatusException(BAD_REQUEST);
@@ -245,7 +267,7 @@ class PrivateTrips {
             }
         } finally {
             try {Files.deleteIfExists(temp);} finally {
-                synchronized (this) { uploading.remove(key); stopped(id); }
+                synchronized (this) { reservedUploadBytes-=remaining; uploading.remove(key); stopped(id); }
             }
         }
     }

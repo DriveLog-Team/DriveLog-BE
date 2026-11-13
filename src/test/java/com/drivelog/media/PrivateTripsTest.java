@@ -108,6 +108,13 @@ class PrivateTripsTest {
                 .isInstanceOfSatisfying(ResponseStatusException.class,e -> assertThat(e.getStatusCode().value()).isEqualTo(422));
         assertThat(store.upload(id,owner,"front",sha,bytes.length,new java.io.ByteArrayInputStream(bytes)).phase()).isEqualTo("UPLOAD");
         assertThat(store.upload(id,owner,"rear",sha,bytes.length,new java.io.ByteArrayInputStream(bytes)).phase()).isEqualTo("READY");
+        Path raw = library.resolve("private/trips/"+id+"/raw");
+        Files.writeString(raw.resolve("upload-crash.part"),"partial");
+        store.recover();
+        assertThat(raw.resolve("upload-crash.part")).doesNotExist();
+        assertThat(raw.resolve("front.mp4")).exists();
+        assertThatThrownBy(() -> store.checkSpace(PrivateTrips.EDIT_HEADROOM+100,101))
+            .isInstanceOfSatisfying(ResponseStatusException.class,e -> assertThat(e.getStatusCode().value()).isEqualTo(507));
         var input=store.input(id,owner);
         var export=Files.createDirectory(store.work(id).resolve("export"));
         var video=Files.writeString(export.resolve("moment-001.mp4"),"edited content");

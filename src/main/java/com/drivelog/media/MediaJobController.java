@@ -111,7 +111,7 @@ public class MediaJobController {
             throw error(HttpStatus.BAD_REQUEST);
         if (input.edit()!=null && ((input.edit().title()!=null && (input.edit().title().isBlank() || input.edit().title().length()>80))
                 || (input.edit().captions()!=null && (input.edit().captions().size()>100 || input.edit().captions().stream().anyMatch(t -> t==null || t.length()>200))))) throw error(HttpStatus.BAD_REQUEST);
-        if (Files.getFileStore(library).getUsableSpace()<2_000_000_000L) throw error(HttpStatus.INSUFFICIENT_STORAGE);
+        privateTrips.checkSpace(Files.getFileStore(library).getUsableSpace(),0);
         Path file = personal ? privateTrips.input(input.tripId(),privateTrips.person(req)) : trips.resolve(input.tripId()).resolve("trip.json");
         if (!Files.isRegularFile(file) || (!personal && !file.toRealPath().startsWith(trips))) throw error(HttpStatus.NOT_FOUND);
         JsonNode manifest = json.readTree(file.toFile());
