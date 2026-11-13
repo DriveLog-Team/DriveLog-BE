@@ -129,18 +129,61 @@ public class MediaJobController {
         }
         UUID id = UUID.randomUUID();
         Job job = new Job(id,input.tripId(),input.profile(),"QUEUED",file,null,manifest.path("roadReview"));
+        String revision=baseVersion;
         if(personal) privateTrips.startEdit(job.tripId());
-        synchronized(jobs) {
-            if (jobs.size() >= 64) jobs.values().stream().filter(j -> !Set.of("RUNNING","QUEUED").contains(j.state()))
-                    .findFirst().ifPresent(j -> jobs.remove(j.id()));
+        try {
+            persist(job, input.edit(), baseVersion);
             jobs.put(id,job);
+            runner.execute(() -> process(job,input.edit(),revision));
+        } catch (RejectedExecutionException | IOException e) {
+            if(personal) privateTrips.stopEdit(job.tripId());
+            jobs.remove(id);
+            Files.deleteIfExists(recordPath(job));
+            if (e instanceof IOException io) throw io;
+            throw error(HttpStatus.TOO_MANY_REQUESTS);
         }
-        String revision = baseVersion;
-        try { runner.execute(() -> process(job,input.edit(),revision)); }
-        catch (RejectedExecutionException e) { if(personal) privateTrips.stopEdit(job.tripId()); jobs.remove(id); throw error(HttpStatus.TOO_MANY_REQUESTS); }
         return ResponseEntity.accepted().cacheControl(CacheControl.noStore()).body(Map.of("jobId",id));
     }
 
+    record Entry(UUID id,String tripId,String profile,String state,String export,JsonNode roadReview,Edit edit,String baseVersion) {}
+    private Path recordPath(Job job) {
+        Path root=PrivateTrips.managed(job.tripId()) ? job.manifest().getParent() : library;
+        return root.resolve("jobs").resolve(job.id()+".json");
+    }
+    private void persist(Job job,Edit edit,String baseVersion) throws IOException {
+        Path record=recordPath(job);
+        Files.createDirectories(record.getParent());
+        Path tmp=Files.createTempFile(record.getParent(),".job-",".tmp");
+        try {
+            json.writeValue(tmp.toFile(),new Entry(job.id(),job.tripId(),job.profile(),job.state(),
+                    job.export()==null ? null : job.export().getFileName().toString(),job.roadReview(),edit,baseVersion));
+            Files.move(tmp,record,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
+        } finally { Files.deleteIfExists(tmp); }
+    }
+    @jakarta.annotation.PostConstruct void recoverJobs() throws IOException {
+        List<Path> roots=new ArrayList<>(List.of(library.resolve("jobs")));
+        try(var folders=Files.list(library.resolve("private/trips"))) {
+            folders.forEach(dir -> roots.add(dir.resolve("jobs")));
+        }
+        synchronized(privateTrips) {
+            for (Path root:roots) {
+                if (!Files.isDirectory(root)) continue;
+                try(var records=Files.newDirectoryStream(root,"*.json")) {
+                    for(Path record:records) {
+                        Entry e=json.readValue(record.toFile(),Entry.class);
+                        boolean personal=PrivateTrips.managed(e.tripId());
+                        Path manifest=personal ? root.getParent().resolve("trip.json") : trips.resolve(e.tripId()).resolve("trip.json");
+                        Path outputRoot=personal ? root.getParent().resolve("work") : library;
+                        Job job=new Job(e.id(),e.tripId(),e.profile(),e.state(),manifest,e.export()==null?null:outputRoot.resolve(e.export()),e.roadReview());
+                        jobs.put(job.id(),job);
+                        if (!Set.of("QUEUED","RUNNING").contains(job.state())) continue;
+                        if (personal) privateTrips.startEdit(job.tripId());
+                        runner.execute(() -> process(job,e.edit(),e.baseVersion()));
+                    }
+                }
+            }
+        }
+    }
     @org.springframework.beans.factory.annotation.Value("${media.worker-timeout-minutes:720}")
     private long workerTimeoutMinutes;
 
@@ -151,7 +194,7 @@ public class MediaJobController {
         try {
             Path outputRoot=PrivateTrips.managed(job.tripId())?privateTrips.work(job.tripId()):library;
             consent(job.manifest());
-            update(job,"RUNNING",null);
+            transition(job,"RUNNING",null,edit,baseVersion);
             List<String> command = new ArrayList<>(List.of(python,script.toString(),job.manifest().toString(),
                     outputRoot.toString(),"--profile",job.profile()));
             if (edit != null) {
@@ -163,7 +206,9 @@ public class MediaJobController {
                 json.writeValue(editPath.toFile(),obj);
                 command.addAll(List.of("--edit",editPath.toString()));
             }
-            process = new ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.DISCARD).start();
+            ProcessBuilder builder=new ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.DISCARD);
+            builder.environment().put("DRIVELOG_JOB_CHECKPOINT",recordPath(job).resolveSibling(job.id()+".checkpoint").toString());
+            process=builder.start();
             if (!process.waitFor(workerTimeoutMinutes,TimeUnit.MINUTES) || process.exitValue()!=0) throw new IOException("Worker failed");
             String result = new String(process.getInputStream().readNBytes(4096), StandardCharsets.UTF_8).strip();
             Path output = outputRoot.resolve(result).toRealPath();
@@ -173,23 +218,38 @@ public class MediaJobController {
             if(PrivateTrips.managed(job.tripId())) privateTrips.protectDraft(job.tripId(),output);
             completed=output;
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt(); update(job,"FAILED",null);
-        } catch (Exception e) { update(job,"FAILED",null); }
+            Thread.currentThread().interrupt();
+        } catch (Exception e) { terminal(job,"FAILED",null); }
         finally {
             if (process!=null && process.isAlive()) {
                 process.descendants().forEach(ProcessHandle::destroyForcibly); process.destroyForcibly();
             }
             if (editPath!=null) try { Files.deleteIfExists(editPath); } catch (IOException ignored) {}
             synchronized(privateTrips) {
+                if(completed!=null) terminal(job,"READY",completed);
                 if(PrivateTrips.managed(job.tripId())) try { privateTrips.stopEdit(job.tripId()); }
                 catch(IOException e) { org.slf4j.LoggerFactory.getLogger(getClass()).error("Pending trip cleanup",e); }
-                if(completed!=null) update(job,"READY",completed);
+
             }
         }
     }
 
-    private void update(Job job,String state,Path output) {
-        jobs.put(job.id(),new Job(job.id(),job.tripId(),job.profile(),state,job.manifest(),output,job.roadReview()));
+    private void transition(Job job,String state,Path output,Edit edit,String base) throws IOException {
+        Job next=new Job(job.id(),job.tripId(),job.profile(),state,job.manifest(),output,job.roadReview());
+        persist(next,edit,base);
+        jobs.put(job.id(),next);
+    }
+    private void terminal(Job job,String state,Path output) {
+        try {
+            transition(job,state,output,null,null);
+            Path checkpoint=recordPath(job).resolveSibling(job.id()+".checkpoint");
+            if (Files.isDirectory(checkpoint)) {
+                try(var files=Files.list(checkpoint)) {
+                    for(Path file:files.toList()) Files.deleteIfExists(file);
+                }
+                Files.deleteIfExists(checkpoint);
+            }
+        } catch(IOException e) { org.slf4j.LoggerFactory.getLogger(getClass()).error("Job journal write failed",e); }
     }
     private void consent(Path manifest) throws IOException {
         JsonNode spec = json.readTree(manifest.toFile());

@@ -76,7 +76,14 @@ class PrivateTrips {
                     }
                 }
                 if ("IMPORTING".equals(phase(doc))) finishImport(doc);
-                if(!access(doc).has("draftVersion") && Set.of("READY","UPLOAD","PENDING").contains(phase(doc))) deleteTree(entry.resolve("work"));
+                if (Files.isDirectory(entry.resolve("work"))) {
+                    try (var paths=Files.list(entry.resolve("work"))) {
+                        for (Path part:paths.toList()) {
+                            String name=part.getFileName().toString();
+                            if (name.startsWith("tmp") || name.startsWith("edit-")) deleteTree(part);
+                        }
+                    }
+                }
                 if(access(doc).has("draftVersion")) deleteTree(entry.resolve("raw"));
                 cleanup(doc);
             }
@@ -529,7 +536,7 @@ class PrivateTrips {
         String id=doc.get("tripId").asText(),phase=phase(doc);
         if(workers.containsKey(id) || !Set.of("SAVING","DISCARDING").contains(phase)) return;
         Path folder=dir(id);
-        deleteTree(folder.resolve("raw"));deleteTree(folder.resolve("work"));
+        deleteTree(folder.resolve("raw"));deleteTree(folder.resolve("work"));deleteTree(folder.resolve("jobs"));
         doc.remove("driveContext");
         if("DISCARDING".equals(phase)) {
             Files.deleteIfExists(folder.resolve("saved.mp4"));access(doc).remove("item");
