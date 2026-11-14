@@ -222,7 +222,7 @@ def render(card, tracks, audio_name, wd, dest, blur_intervals=(), masks=(), capt
     ff("-v","error","-xerror",*input_args(dest),"-map","0:v:0","-map","0:a:0","-f","null","-")
 
 
-def apply_edit(cards, edit, limit):
+def apply_edit(cards, edit, limit, marks=None):
     card = next((c for c in cards if c["id"] == edit["id"]), None)
     if card is None:
         raise ValueError("Unknown moment")
@@ -237,6 +237,9 @@ def apply_edit(cards, edit, limit):
     texts = edit.get("captions", [c["text"] for c in card["cues"]])
     if not isinstance(texts,list) or len(texts)!=len(card["cues"]) or any(not isinstance(t,str) or len(t)>200 for t in texts):
         raise ValueError("Invalid caption edits")
+    if "markIds" in card:
+        marks = marks or {}
+        card["markIds"] = [key for key in card["markIds"] if key in marks and start <= marks[key]["atMs"] < end]
     previous_cues=card["cues"]
     card.update(startMs=start,endMs=end,title=title, cues=[dict(c,text=t,startMs=max(start,c["startMs"]),endMs=min(end,c["endMs"]))
         for c,t in zip(card["cues"],texts) if c["endMs"]>start and c["startMs"]<end])
@@ -284,15 +287,15 @@ def from_draft(manifest, library, spec, profile, edit_file):
     if edit:
         if parent["profile"] != profile:
             raise ValueError("Different edit profile")
-        apply_edit(parent["cards"],edit,limit)
+        apply_edit(parent["cards"],edit,limit,spec.get("marks"))
         parent["cards"] = [c for c in parent["cards"] if c["id"]==edit["id"]]
     else:
         for card in parent["cards"]:
             if card["endMs"]-card["startMs"]>limit:
                 anchor=card.get("recommendation",{}).get("quoteStartMs",card["startMs"])
                 start=min(max(card["startMs"],anchor),card["endMs"]-limit)
-                apply_edit([card],dict(id=card["id"],startMs=start,endMs=start+limit),limit)
-    version=hashlib.sha256(json.dumps([initial["version"],profile,edit],sort_keys=True).encode()).hexdigest()[:32]
+                apply_edit([card],dict(id=card["id"],startMs=start,endMs=start+limit),limit,spec.get("marks"))
+    version=hashlib.sha256(json.dumps(["marks-v2",initial["version"],profile,edit],sort_keys=True).encode()).hexdigest()[:32]
     target=library/version
     if (target/"cards.json").is_file():
         return target
@@ -367,7 +370,7 @@ def run(manifest, library, profile, edit_file=None):
             if parent["sourceRevision"] != source_revision or parent["profile"] != profile:
                 raise ValueError("Source or profile changed since the base export")
             cards = parent["cards"]
-            apply_edit(cards,edit,limit)
+            apply_edit(cards,edit,limit,spec.get("marks"))
             selected = [next(c for c in cards if c["id"] == edit["id"])]
         else:
             wav = wd/"audio.wav"

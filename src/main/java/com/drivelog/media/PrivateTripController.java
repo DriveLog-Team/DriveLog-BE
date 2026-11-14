@@ -40,6 +40,26 @@ class PrivateTripController {
         return store.depart(body);
     }
 
+    @PostMapping("/private-trips/{id}/invites")
+    @Operation(operationId="invitePassenger",summary="주행 소유자가 30분 일회 참여 링크 발급",security=@SecurityRequirement(name="personToken"))
+    @ApiResponse(responseCode="200",description="초대 URL 및 만료 시각",useReturnTypeSchema=true)
+    PrivateTrips.Invite invite(@PathVariable String id,@RequestBody PrivateTrips.InviteSeat seat,HttpServletRequest req)throws IOException {
+        return store.invite(id,store.person(req),seat);
+    }
+    @PostMapping("/private-trips/{id}/join")
+    @Operation(operationId="joinInvitedTrip",summary="초대받은 동승자의 닉네임 등록 및 개인 자격증명 발급",description="HTTPS 필수. claimKey는 기기가 생성한 32바이트 base64url 값이며 동일 요청 재시도 시 유지한다. 다른 claimKey 재사용 또는 만료는 410.")
+    @ApiResponse(responseCode="200",description="같은 주행과 개인 토큰",useReturnTypeSchema=true)
+    @ApiResponse(responseCode="410",description="만료·마감 또는 이미 다른 기기에서 수락",content=@Content)
+    PrivateTrips.Guest join(@PathVariable String id,@RequestBody PrivateTrips.JoinInput body,HttpServletRequest req)throws IOException {
+        if(!req.isSecure()) throw new org.springframework.web.server.ResponseStatusException(HttpStatus.UNAUTHORIZED);
+        return store.join(id,body);
+    }
+    @PutMapping("/private-trips/{id}/display-name")
+    @Operation(operationId="setPassengerName",summary="주행 중 내 타임라인 표시 이름 지정",security=@SecurityRequirement(name="personToken"))
+    @ApiResponse(responseCode="200",description="저장된 표시 이름",useReturnTypeSchema=true)
+    PrivateTrips.NameInput name(@PathVariable String id,@RequestBody PrivateTrips.NameInput input,HttpServletRequest req)throws IOException {
+        return store.setName(id,store.person(req),input);
+    }
     record VoiceMark(Long atMs,String command) {}
     @PutMapping("/private-trips/{id}/voice-marks/{markId}")
     @ApiResponse(responseCode="200",description="저장된 표시. 차량은 ‘표시했어요’로 응답할 수 있다.",useReturnTypeSchema=true)
@@ -130,6 +150,12 @@ class PrivateTripController {
     @ApiResponse(responseCode="200",description="폐기 상태",useReturnTypeSchema=true)
     @Operation(operationId="discardTrip",summary="저장 없이 운행 폐기 또는 보관 영상 삭제",security=@SecurityRequirement(name="personToken"))
     PrivateTrips.Trip discard(@PathVariable String id,HttpServletRequest req)throws IOException {return store.discard(id,store.person(req));}
+    @PutMapping("/private-trips/{id}/picks/{markId}")
+    @Operation(operationId="pickSharedMoment",summary="재생 가능한 공동 표시 클립을 내 보관 대상으로 선택",description="본인이 표시한 클립은 기본 선택. 초안 READY에서 추가 선택하고 소유자가 finalize하면 보관된다.",security=@SecurityRequirement(name="personToken"))
+    @ApiResponse(responseCode="200",description="저장 대상 표시. 같은 선택은 멱등",useReturnTypeSchema=true)
+    PrivateTrips.Pick pick(@PathVariable String id,@PathVariable UUID markId,HttpServletRequest req)throws IOException {
+        return store.pick(id,store.person(req),markId);
+    }
     @GetMapping("/library")
     @ApiResponse(responseCode="200",description="본인의 저장 영상 배열",useReturnTypeSchema=true)
     @Operation(operationId="listLibrary",summary="본인의 보관함을 최근 저장순으로 조회",security=@SecurityRequirement(name="personToken"))

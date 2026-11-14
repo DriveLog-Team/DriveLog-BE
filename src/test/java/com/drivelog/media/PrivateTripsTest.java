@@ -17,6 +17,72 @@ class PrivateTripsTest {
         "occupants":[{"ageBand":"14plus","allowed":true},{"ageBand":"under14","guardianAllowed":true}]},
         "audioProcessingConsent":true,"geminiTranscriptConsent":true,"roadReview":{"complete":true}}
         """;
+    @Test void participantAlbumSurvivesFinalizeAndSharingWithdrawal() throws Exception {
+        var store=new PrivateTrips(library);
+        UUID owner=store.issue().accountId(),guest=store.issue().accountId(),outside=store.issue().accountId();
+        var seats=List.of(new PrivateTrips.Seat(owner,false,null),new PrivateTrips.Seat(guest,false,null));
+        var depart=new PrivateTrips.Departure(UUID.randomUUID(),owner,seats,java.time.Instant.now());
+        String id=store.depart(depart).tripId();
+        UUID early=UUID.randomUUID(),late=UUID.randomUUID(),different=UUID.randomUUID();
+        for(var mark:List.of(early,late,different))
+            store.mark(id,guest,mark,new PrivateTrips.MarkInput(PrivateTrips.MarkKind.TAP,mark.equals(early)?1000L:8000L));
+        store.register(new PrivateTrips.Registration(depart.sourceId(),owner,seats,new PrivateTrips.Source("P",true,"front",0,0,true)));
+        for(var actor:List.of(owner,guest))store.decide(id,actor,PrivateTrips.Role.PASSENGER,actor,new PrivateTrips.Decision(true,true,true,true));
+        store.attachContext(id,owner,new PrivateTrips.DriveContext(null,null,List.of(new PrivateTrips.DriveEvent(8500,PrivateTrips.EventKind.LANDMARK,"바다"))));
+        assertThat(store.timeline(id,owner).entries().getFirst().place()).isEqualTo("바다");
+        byte[] bytes=Files.readAllBytes(Path.of("src/test/resources/media/short.mp4"));
+        String sha=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+        for(String side:List.of("front","rear"))store.upload(id,owner,side,sha,bytes.length,new java.io.ByteArrayInputStream(bytes));
+        Path export=Files.createDirectory(store.work(id).resolve("draft"));
+        String cards="{\"cards\":[{\"id\":\"moment-001\",\"title\":\"one\",\"file\":\"moment-001.mp4\",\"startMs\":0,\"endMs\":10000,\"markIds\":[\"%s\",\"%s\"]},{\"id\":\"moment-002\",\"title\":\"two\",\"file\":\"moment-002.mp4\",\"startMs\":0,\"endMs\":10000,\"markIds\":[\"%s\"]}]}";
+        Files.writeString(export.resolve("cards.json"),cards.formatted(early,late,different));
+        for(String moment:List.of("moment-001","moment-002")) {
+            Files.writeString(export.resolve(moment+".mp4"),moment);
+            Files.writeString(export.resolve("master-"+moment+".mp4"),moment);
+        }
+        store.protectDraft(id,export);
+        Path edited=Files.createDirectory(store.work(id).resolve("edited"));
+        Files.writeString(edited.resolve("cards.json"),cards.formatted(early,late,different).replace("\"startMs\":0","\"startMs\":5000"));
+        Files.writeString(edited.resolve("moment-001.mp4"),"edited");
+        var job=new MediaJobController.Job(UUID.randomUUID(),id,"STORY_15","READY",store.input(id,owner),edited,null);
+        var media=mock(MediaJobController.class);var req=new MockHttpServletRequest();
+        when(media.owned(job.id(),req)).thenReturn(job);when(media.clip(job,"moment-001")).thenReturn(edited.resolve("moment-001.mp4"));
+        store.finish(id,owner,new PrivateTrips.Selection(job.id(),"moment-001"),media,req);
+        assertThat(store.items(guest)).hasSize(2);
+        assertThat(store.items(outside)).isEmpty();
+        assertThatThrownBy(()->store.markedClip(id,guest,early)).isInstanceOf(ResponseStatusException.class);
+        assertThat(store.markedClip(id,guest,late)).hasContent("edited");
+        assertThat(store.markedClip(id,guest,different)).hasContent("moment-002");
+        var restarted=new PrivateTrips(library);restarted.recover();
+        assertThat(restarted.items(guest)).hasSize(2);
+        restarted.decide(id,guest,PrivateTrips.Role.PASSENGER,guest,new PrivateTrips.Decision(true,true,null,false));
+        assertThat(restarted.items(guest)).isEmpty();
+        assertThatThrownBy(()->restarted.markedClip(id,guest,different)).isInstanceOf(ResponseStatusException.class);
+        restarted.decide(id,guest,PrivateTrips.Role.PASSENGER,guest,new PrivateTrips.Decision(false,false));
+        assertThat(library.resolve("private/trips/"+id+"/album")).doesNotExist();
+    }
+
+    @Test void invitationIsSingleUseAndKeepsOriginalDepartureRetryable() throws Exception {
+        var store=new PrivateTrips(library);
+        UUID owner=store.issue().accountId();
+        var seats=List.of(new PrivateTrips.Seat(owner,false,null));
+        var depart=new PrivateTrips.Departure(UUID.randomUUID(),owner,seats,java.time.Instant.now());
+        String id=store.depart(depart).tripId();
+        var invite=store.invite(id,owner,new PrivateTrips.InviteSeat(true,owner));
+        String code=invite.url().substring(invite.url().lastIndexOf('.')+1);
+        var input=new PrivateTrips.JoinInput(code,"a".repeat(43),"은서");
+        var guest=store.join(id,input);
+        assertThat(store.join(id,input)).isEqualTo(guest);
+        assertThatThrownBy(()->store.join(id,new PrivateTrips.JoinInput(code,"b".repeat(43),"다른 기기")))
+            .isInstanceOfSatisfying(ResponseStatusException.class,e->assertThat(e.getStatusCode().value()).isEqualTo(410));
+        assertThat(store.depart(depart).occupants()).hasSize(2);
+        UUID mark=UUID.randomUUID();
+        store.mark(id,guest.accountId(),mark,new PrivateTrips.MarkInput(PrivateTrips.MarkKind.TAP,12000L));
+        assertThat(store.timeline(id,owner).entries().getFirst().authorName()).isEqualTo("은서");
+        assertThat(store.register(new PrivateTrips.Registration(depart.sourceId(),owner,seats,
+            new PrivateTrips.Source("P",true,"front",0,0,true))).occupants()).hasSize(2);
+        assertThatThrownBy(()->store.join(id,input)).isInstanceOf(ResponseStatusException.class);
+    }
     @Test void drivingMarksBecomeSharedProtectedClipsOnlyAfterConsent() throws Exception {
         var store=new PrivateTrips(library);
         UUID owner=store.issue().accountId(), child=store.issue().accountId(), guardian=store.issue().accountId();

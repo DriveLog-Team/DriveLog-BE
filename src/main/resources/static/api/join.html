@@ -1,0 +1,6 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>DriveLog 동승자</title>
+<style>*{box-sizing:border-box}body{max-width:38rem;margin:auto;padding:2rem 1rem;color:#213e33;font:16px/1.6 system-ui,sans-serif}input,button{font:inherit;padding:.6em .8em;margin:.25em}button{cursor:pointer}video{width:100%}section{margin:2em 0}</style></head><body><h1>동승자 주행</h1>
+<form id="entry"><label>표시 이름 <input id="nick" maxlength="32" required autocomplete="nickname"></label><button>초대 수락</button></form>
+<section id="ride" hidden><button id="mark">지금 순간 남기기</button><button id="refresh">새로 고침</button><ol id="list"></ol><video id="player" controls hidden></video>
+<form id="consent" hidden><h2>정차 후 내 동의</h2><p>전·후방 영상과 원음을 서버에서 분석하고 발화 후보를 Gemini에 전송합니다.</p><label><input type="checkbox" id="locationOpt">장소 사용</label> <label><input type="checkbox" id="shareOpt">표시한 클립 공유</label><p><button>추출·분석 동의</button><button type="button" id="deny">거절·철회</button></p></form></section>
+<p role="status" id="status"></p><script src="/api/join.js" defer></script></body></html>
