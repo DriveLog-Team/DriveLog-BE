@@ -4,7 +4,7 @@
 <style>
 *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#fbfaf7;color:#222e2a;font:16px/1.65 system-ui,sans-serif;word-break:keep-all}main{max-width:880px;padding:42px clamp(18px,5vw,58px) 80px;margin:auto}header{border-bottom:2px solid #28564b;padding-bottom:23px}h1{font-size:clamp(30px,5vw,48px);line-height:1.18;margin:12px 0}h2{font-size:25px;margin:0 0 10px}h3{font-size:18px;margin:0}section{margin-top:36px}p{margin:6px 0 12px}a{color:#155c50;text-underline-offset:3px}nav{display:flex;gap:14px;flex-wrap:wrap}small{color:#466058}li{padding:5px 0}details{padding:12px 0;border-bottom:1px solid #cdd7d0}summary{cursor:pointer;font-weight:650}code,pre{font:14px/1.65 ui-monospace,monospace}code{overflow-wrap:anywhere;color:#273e35}pre{overflow:auto;background:#eaf0eb;padding:12px 14px;border-radius:6px}dl{display:grid;grid-template-columns:max-content 1fr;gap:9px 18px}dt{font-weight:700}dd{margin:0}#api li{list-style:none;border-bottom:1px solid #e3e7e3;padding:10px 0}#api ul{padding:0}#api code{display:block}summary:focus-visible,a:focus-visible{outline:3px solid #d07b20}
 </style></head><body><main><header><small>DriveLog · 서버 연동</small><h1>주행 표시에서 QR 저장까지</h1>
-<nav><a href="#flow">호출 순서</a><a href="#album">동승자 앨범</a><a href="#errors">오류 복구</a><a href="#demo">시연 범위</a><a href="#api">API 목록</a><a href="/api/swagger-ui.html">Swagger 열기 ↗</a></nav></header>
+<nav><a href="#flow">호출 순서</a><a href="#album">동승자 앨범</a><a href="#story-share">스토리 공유</a><a href="#errors">오류 복구</a><a href="#demo">시연 범위</a><a href="#api">API 목록</a><a href="/api/swagger-ui.html">Swagger 열기 ↗</a></nav></header>
 <section id="flow"><h2>연동 순서</h2>
 <p>운영 주소 <code>https://35.216.33.209</code>. 팀 서버가 개인 계정과 운행을 발급합니다. 팀 토큰은 차량·폰 앱에 포함하지 않습니다. 개인 요청에는 해당 사용자의 <code>Authorization: Bearer …</code>가 필요합니다.</p>
 <details><summary>1. 출발 등록과 순간 표시</summary><p>팀 서버가 계정을 발급하고 출발 시각과 참여자를 보냅니다. 전화 버튼과 음성 명령은 출발 기준 밀리초를 사용합니다. 같은 조작을 재시도할 때 markId를 유지합니다.</p>
@@ -43,8 +43,8 @@ PUT /api/private-trips/{id}/display-name
 <details><summary>개인 선택과 보관</summary><pre>PUT /api/private-trips/{id}/picks/{markId}
 POST /api/private-trips/{id}/finalize
 GET /api/library</pre><p>안전한 클립이 생성된 내 표시는 기본 선택입니다. 초안 READY에서 재생 가능한 다른 표시도 내 목록에 추가할 수 있습니다. 소유자가 최종 편집본을 확정하면 각자의 표시 클립과 추가 선택이 함께 보관됩니다. 잘라낸 시점은 최종 편집본에 연결되지 않습니다. 목록 항목별 clipUrl을 사용하세요. 기존 항목의 URL이 없으면 /api/library/{tripId}/clip을 사용합니다. 동승자 재생에는 현재의 전원 공유 동의가 필요합니다. 추출 철회 시 공동 보관본도 삭제됩니다.</p></details>
-<details><summary>카카오톡·인스타그램 연동 가능 범위</summary><p>카카오톡 공유 SDK는 사용자가 채팅방을 선택해 링크 메시지를 전송합니다. 개인 보관 URL에는 인증이 필요하고 일회 QR은 한 번만 사용할 수 있습니다. 여러 사람이 보는 공유 링크는 별도 권한 설계가 필요합니다. 파일은 폰에 받은 MP4를 OS 공유 메뉴로 전달해 수신 앱 지원을 확인합니다. <a href="https://developers.kakao.com/docs/ko/kakaotalk-share/common">카카오 공식 가이드</a></p>
-<p>인스타 스토리는 모바일 작성기에 넘겨 사용자가 게시합니다. 릴스는 내려받은 MP4를 릴스 작성기에서 선택할 수 있습니다. 앱에서 작성기로 직접 넘기는 경로는 모바일 기기 검증이 필요합니다. 서버 게시 API는 게시 권한을 부여한 프로 계정 대상이며 Facebook Login 경로의 스토리는 비즈니스 계정 조건이 있습니다. DriveLog는 SNS에 자동 게시하지 않습니다. <a href="https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api">Meta 게시 API</a></p></details></section>
+<details id="story-share"><summary>카카오톡·인스타그램 연동 가능 범위</summary><p>카카오톡 공유 SDK는 사용자가 채팅방을 선택해 링크 메시지를 전송합니다. 개인 보관 URL에는 인증이 필요하고 일회 QR은 한 번만 사용할 수 있습니다. 여러 사람이 보는 공유 링크는 별도 권한 설계가 필요합니다. 파일은 폰에 받은 MP4를 OS 공유 메뉴로 전달해 수신 앱 지원을 확인합니다. <a href="https://developers.kakao.com/docs/ko/kakaotalk-share/common">카카오 공식 가이드</a></p>
+<p><strong>Android 스토리 공유</strong> · 휴대폰에 DriveLog 스토리 앱과 Instagram을 설치하고 DriveLog 공개 Meta 앱 ID를 한 번 설정합니다. QR을 Android Chrome에서 열고 ‘인스타 스토리에 공유’를 누르면 앱이 <code>POST /api/handoffs/redeem</code>으로 받은 MP4를 스토리 작성기에 전달합니다. 게시 여부는 사용자가 결정합니다. 앱이 없거나 iPhone을 쓰면 ‘MP4 내려받기’를 선택하세요. 현재 Instagram 실기기 검증은 대기 중입니다. 릴스는 내려받은 MP4를 릴스 작성기에서 선택할 수 있습니다. 릴스 작성기로 직접 넘기는 기능은 미구현입니다. 서버 게시 API는 게시 권한을 부여한 프로 계정 대상이며 Facebook Login 경로의 스토리는 비즈니스 계정 조건이 있습니다. DriveLog는 SNS에 자동 게시하지 않습니다. <a href="https://www.postman.com/meta/instagram/documentation/6yqw8pt/instagram-api">Meta 게시 API</a></p></details></section>
 <section id="errors"><h2>오류가 났을 때</h2><dl>
 <dt>400 · 422</dt><dd>파일 길이·해시·영상 규격과 지정 오디오를 확인한 뒤 같은 쪽으로 다시 전송합니다. 잘못된 교체 요청은 기존 영상을 보존합니다.</dd>
 <dt>401 · 403</dt><dd>개인/팀 인증과 탑승자·보호자의 동의 상태를 확인합니다.</dd>
@@ -53,7 +53,7 @@ GET /api/library</pre><p>안전한 클립이 생성된 내 표시는 기본 선�
 <dt>503</dt><dd>보관함 저장 시 같은 jobId와 moment로 재시도합니다.</dd>
 <dt>FAILED</dt><dd>상태 조회를 멈춥니다. 외부 AI 응답을 확인하지 못한 작업은 자동 재전송을 멈출 수 있습니다. 새 작업은 사용자 재시도로 등록합니다.</dd></dl></section>
 <section id="demo"><h2>시연과 실서비스 범위</h2><h3>시연에서 연결할 기능</h3><p>합성 전·후방 MP4와 발급된 개인 계정으로 표시·동의·추천·편집·저장·QR을 연결합니다. 대화 추천은 Gemini가 맡고 도로 블러와 보행자 구간 제외는 서버에서 처리합니다. 영상 보호 품질은 공유 전에 확인합니다.</p>
-<h3>실서비스에 남은 구현</h3><p>실차 카메라 자동 공급과 실제 주행 상태에 따른 화면 잠금, 정식 로그인과 보호자 관계 확인, Gleo 직접 연동, 인스타그램 스토리·카카오톡 작성기 호출은 별도 구현·기기 검증이 필요합니다.</p></section>
+<h3>실서비스에 남은 구현</h3><p>실차 카메라 자동 공급과 실제 주행 상태에 따른 화면 잠금, 정식 로그인과 보호자 관계 확인, Gleo 직접 연동, iOS 스토리 공유와 카카오톡 작성기 호출은 추가 구현이 필요합니다.</p></section>
 <section id="api"><h2>API 목록</h2><p>요청 예시와 응답 타입은 <a href="/api/swagger-ui.html">Swagger</a>에서 확인하세요. <a href="/api/v3/api-docs">OpenAPI JSON</a></p><details><summary>현재 배포에서 제공하는 API 보기</summary><ul id="operations"></ul><p id="notice" role="status"></p></details></section>
 </main><script>
 const list=document.querySelector('#operations');
