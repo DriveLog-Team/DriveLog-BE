@@ -27,7 +27,7 @@ class ProtectedClipTest(unittest.TestCase):
             subprocess.run([ffmpeg,"-loglevel","error","-f","lavfi","-i","color=blue:s=360x640:r=25",
                 "-f","lavfi","-i","sine=frequency=420","-t","2","-c:v","libx264","-c:a","aac",str(master)],check=True)
             card=dict(id="moment-001",startMs=5000,endMs=7000,title="Original",summary="Original",
-                      driveContext=dict(departure="PrivateRoute",destination="PrivateDestination"),
+                      driveContext=dict(departure="PrivateRoute",destination="PrivateDestination",events=[]),
                       shareMasks=[dict(x=10,y=10,width=40,height=40)],
                       cues=[dict(startMs=5000,endMs=7000,text="Caption")],file="moment-001.mp4")
             (export/"cards.json").write_text(json.dumps(dict(version=canonical,sourceRevision="source",profile="STORY_15",cards=[card])))
