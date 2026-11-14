@@ -31,7 +31,7 @@ class PrivateTrips {
     enum MarkKind { TAP, VOICE, VOICE_UNTIL_LAUGHTER }
     record MarkInput(MarkKind kind, Long atMs) {}
     record DriveMark(UUID id, UUID author, MarkKind kind, long atMs) {}
-    record TimelineEntry(DriveMark mark, String place, String state, String title, String clipUrl) {}
+    record TimelineEntry(DriveMark mark, String authorName, String place, String state, String title, String clipUrl) {}
     record Timeline(String tripId, Instant startedAt, String phase, List<TimelineEntry> entries) {}
     record Source(String gear, boolean stationary, String audioSource, long frontOffsetMs, long rearOffsetMs, boolean roadReviewed) {}
     enum Role { PASSENGER, GUARDIAN }
@@ -410,16 +410,39 @@ class PrivateTrips {
                 }
             }
             String place=markedPlace(doc,mark);
-            entries.add(new TimelineEntry(mark,place,state,title,url));
+            entries.add(new TimelineEntry(mark,authorName(doc,mark.author()),place,state,title,url));
         }
         entries.sort(Comparator.comparingLong((TimelineEntry e)->e.mark().atMs()).thenComparing(e->e.mark().id()));
         Instant start=access(doc).has("startedAt")?Instant.parse(access(doc).get("startedAt").asText()):null;
         return new Timeline(id,start,phase(doc),entries);
     }
+    record NameInput(String displayName) {}
+    synchronized NameInput setName(String id,UUID actor,NameInput input)throws IOException {
+        ObjectNode doc=participantTrip(id,actor);
+        if(input==null || !validName(input.displayName())) throw new ResponseStatusException(BAD_REQUEST);
+        if(!"DRIVING".equals(phase(doc))) throw new ResponseStatusException(CONFLICT);
+        String name=input.displayName().strip();
+        access(doc).withObjectProperty("names").put(actor.toString(),name);store(doc);
+        return new NameInput(name);
+    }
+    private String authorName(ObjectNode doc,UUID actor) {
+        String name=access(doc).path("names").path(actor.toString()).asString(null);
+        if(name!=null) return name;
+        if(actor.toString().equals(access(doc).path("owner").asText())) return "운전자";
+        List<Seat> occupants=seats(doc);
+        for(int i=0;i<occupants.size();i++) if(occupants.get(i).occupant().equals(actor)) return "탑승자 "+(i+1);
+        return "탑승자";
+    }
     private String markedPlace(ObjectNode doc, DriveMark mark) {
-        for(JsonNode event:doc.path("driveContext").path("events"))
-            if(event.path("atMs").asLong()==mark.atMs()) return event.path("label").asString(null);
-        return access(doc).path("markPlaces").path(mark.id().toString()).asString(null);
+        long nearest=30001; String label=null;
+        for(JsonNode event:doc.path("driveContext").path("events")) {
+            String candidate=event.path("label").asString(null);
+            if(candidate==null || candidate.isBlank()) continue;
+            long delta=Math.abs(event.path("atMs").asLong()-mark.atMs());
+            if(delta<nearest) { nearest=delta;label=candidate; }
+            else if(delta==nearest && !candidate.equals(label)) label=null;
+        }
+        return nearest<=30000 ? label : access(doc).path("markPlaces").path(mark.id().toString()).asString(null);
     }
     private boolean canPlayMarked(ObjectNode doc,UUID actor) {
         if(actor.toString().equals(access(doc).path("owner").asText())) return true;

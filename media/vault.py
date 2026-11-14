@@ -81,7 +81,7 @@ def backup(bucket, root, doc):
     if bucket.exists("revoked/" + tid):
         raise ValueError("Revoked item")
     # Only the selected clip, its permissions and the fields used to view/discard it survive.
-    access = {key: a[key] for key in ("owner","seats","receipts","item","selection","usedContext")
+    access = {key: a[key] for key in ("owner","seats","receipts","item","selection","usedContext","names")
               if key in a}
     access.update(phase="SAVED", vaultSynced=True)
     spec = {"tripId": tid, "access": access, "extraction": {"occupantCount": len(a["seats"])},

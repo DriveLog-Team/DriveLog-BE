@@ -54,6 +54,12 @@ class PrivateTripController {
         if(!req.isSecure()) throw new org.springframework.web.server.ResponseStatusException(HttpStatus.UNAUTHORIZED);
         return store.join(id,body);
     }
+    @PutMapping("/private-trips/{id}/display-name")
+    @Operation(operationId="setPassengerName",summary="주행 중 내 타임라인 표시 이름 지정",security=@SecurityRequirement(name="personToken"))
+    @ApiResponse(responseCode="200",description="저장된 표시 이름",useReturnTypeSchema=true)
+    PrivateTrips.NameInput name(@PathVariable String id,@RequestBody PrivateTrips.NameInput input,HttpServletRequest req)throws IOException {
+        return store.setName(id,store.person(req),input);
+    }
     record VoiceMark(Long atMs,String command) {}
     @PutMapping("/private-trips/{id}/voice-marks/{markId}")
     @ApiResponse(responseCode="200",description="저장된 표시. 차량은 ‘표시했어요’로 응답할 수 있다.",useReturnTypeSchema=true)
