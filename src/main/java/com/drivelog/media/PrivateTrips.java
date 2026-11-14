@@ -154,6 +154,62 @@ class PrivateTrips {
     private void known(UUID id) {
         if(id==null || !Files.isRegularFile(accounts.resolve(id.toString()))) throw new ResponseStatusException(BAD_REQUEST);
     }
+    record Invite(String url,Instant expiresAt) {}
+    record InviteSeat(boolean under14,UUID guardian) {}
+    record JoinInput(String code,String claimKey,String displayName) {}
+    record Guest(String tripId,UUID accountId,String accessToken) {}
+
+    @Value("${media.handoff-origin:}") private String publicOrigin="";
+    synchronized Invite invite(String id,UUID actor,InviteSeat seat) throws IOException {
+        owner(id,actor);
+        ObjectNode doc=read(id);
+        if(!"DRIVING".equals(phase(doc))) throw new ResponseStatusException(CONFLICT);
+        if(seat==null || seat.under14()!=(seat.guardian()!=null)) throw new ResponseStatusException(BAD_REQUEST);
+        if(seat.under14() && seats(doc).stream().noneMatch(s -> s.occupant().equals(seat.guardian()) && !s.under14()))
+            throw new ResponseStatusException(BAD_REQUEST);
+        ObjectNode invites=access(doc).withObjectProperty("invites");
+        long now=Instant.now().getEpochSecond();
+        for(String key:List.copyOf(invites.propertyNames())) if(invites.get(key).path("until").asLong()<=now) invites.remove(key);
+        if(seats(doc).size()>=16 || invites.size()>=32) throw new ResponseStatusException(CONFLICT);
+        byte[] bytes=new byte[32]; random.nextBytes(bytes);
+        String code=Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        Instant until=Instant.ofEpochSecond(now+1800);
+        var invitation=invites.putObject(HexFormat.of().formatHex(hash(code))).put("until",until.getEpochSecond());
+        invitation.set("seat",json.valueToTree(seat));
+        store(doc);
+        return new Invite(publicOrigin.replaceFirst("/$","")+"/api/join.html#"+id+"."+code,until);
+    }
+    synchronized Guest join(String id,JoinInput input) throws IOException {
+        if(input==null || input.code()==null || !input.code().matches("[A-Za-z0-9_-]{43}") ||
+           input.claimKey()==null || !input.claimKey().matches("[A-Za-z0-9_-]{43}") || !validName(input.displayName()))
+            throw new ResponseStatusException(BAD_REQUEST);
+        ObjectNode doc=read(id);
+        var key=HexFormat.of().formatHex(hash(input.code()));
+        var node=access(doc).path("invites").path(key);
+        if(!"DRIVING".equals(phase(doc)) || node.path("until").asLong()<=Instant.now().getEpochSecond()) throw new ResponseStatusException(GONE);
+        String secret=Base64.getUrlEncoder().withoutPadding().encodeToString(hash(input.code()+"."+input.claimKey()));
+        if(node.has("guest")) {
+            UUID existing=UUID.fromString(node.get("guest").asText());
+            String token=existing+"."+secret;
+            if(!MessageDigest.isEqual(hash(token),Files.readAllBytes(accounts.resolve(existing.toString())))) throw new ResponseStatusException(GONE);
+            return new Guest(id,existing,token);
+        }
+        if(seats(doc).size()>=16) throw new ResponseStatusException(CONFLICT);
+        UUID guest=UUID.randomUUID(); String token=guest+"."+secret;
+        Files.write(accounts.resolve(guest.toString()),hash(token),StandardOpenOption.CREATE_NEW);
+        var a=access(doc);
+        if(!a.has("departureSeats")) a.set("departureSeats",a.get("seats").deepCopy());
+        InviteSeat seat=json.treeToValue(node.get("seat"),InviteSeat.class);
+        a.withArray("seats").add(json.valueToTree(new Seat(guest,seat.under14(),seat.guardian())));
+        ((ObjectNode)node).put("guest",guest.toString());
+        a.withObjectProperty("names").put(guest.toString(),input.displayName().strip());
+        ((ObjectNode)doc.get("extraction")).put("occupantCount",seats(doc).size());
+        refresh(doc);store(doc);
+        return new Guest(id,guest,token);
+    }
+    private static boolean validName(String name) {
+        return name!=null && !name.isBlank() && name.length()<=32 && name.codePoints().noneMatch(Character::isISOControl);
+    }
     synchronized Trip register(Registration reg) throws IOException {
         return register(reg,null);
     }
@@ -180,12 +236,13 @@ class PrivateTrips {
         Path folder=dir(id);
         if(Files.isRegularFile(folder.resolve("trip.json"))) {
             ObjectNode prior=read(id);
-            if(!reg.owner().toString().equals(access(prior).path("owner").asText()) || !access(prior).get("seats").equals(json.valueToTree(reg.occupants()))) throw new ResponseStatusException(CONFLICT);
+            if(!reg.owner().toString().equals(access(prior).path("owner").asText()) || !(access(prior).get("seats").equals(json.valueToTree(reg.occupants())) || access(prior).path("departureSeats").equals(json.valueToTree(reg.occupants())))) throw new ResponseStatusException(CONFLICT);
             if(startedAt!=null) {
                 if(!startedAt.toString().equals(access(prior).path("startedAt").asText())) throw new ResponseStatusException(CONFLICT);
                 return view(prior);
             }
             if("DRIVING".equals(phase(prior))) {
+                access(prior).remove("invites");
                 configureParked(prior,source);
                 access(prior).put("phase","PENDING");
                 store(prior);
