@@ -22,6 +22,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: node --test src/test/js/handoff.test.cjs
       - run: mvn --batch-mode --no-transfer-progress verify
       - run: python3 -m unittest discover -s media -p 'test_*.py' -v
       - name: Check Linux speech and video runtime
