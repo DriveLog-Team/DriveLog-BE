@@ -53,10 +53,10 @@ class Bucket:
             if exc.code != 404:
                 raise
 
-    def names(self):
+    def names(self, prefix="items/"):
         page = {}
         while True:
-            with self.request("GET", self.base + "?" + urlencode({"prefix": "items/", **page})) as res:
+            with self.request("GET", self.base + "?" + urlencode({"prefix": prefix, **page})) as res:
                 listing = json.load(res)
             yield from (item["name"] for item in listing.get("items", []))
             if "nextPageToken" not in listing:
@@ -81,7 +81,7 @@ def backup(bucket, root, doc):
     if bucket.exists("revoked/" + tid):
         raise ValueError("Revoked item")
     # Only the selected clip, its permissions and the fields used to view/discard it survive.
-    access = {key: a[key] for key in ("owner","seats","receipts","item","selection","usedContext","names")
+    access = {key: a[key] for key in ("owner","seats","receipts","item","selection","usedContext","names","picks")
               if key in a}
     access.update(phase="SAVED", vaultSynced=True)
     spec = {"tripId": tid, "access": access, "extraction": {"occupantCount": len(a["seats"])},
@@ -89,7 +89,7 @@ def backup(bucket, root, doc):
     # Retain timeline links only for the finalized clip.
     if "draftVersion" in a:
         access["draftVersion"] = a["draftVersion"]
-        access["markedClips"] = {k:v for k,v in a.get("markedClips", {}).items() if v["id"] == a["selection"]["moment"]}
+        access["markedClips"] = {k:v for k,v in a.get("markedClips", {}).items() if "albumFile" in v or v["id"] == a["selection"]["moment"]}
         spec["marks"] = doc.get("marks", {})
         access["markPlaces"] = a.get("markPlaces", {})
     if "startedAt" in a:
@@ -101,7 +101,18 @@ def backup(bucket, root, doc):
         if not bucket.exists(key):
             source.seek(0)
             bucket.put(key, source, clip.stat().st_size)
-    payload = json.dumps({"schema":1,"trip":spec,"accounts":accounts,"sha256":digest}).encode()
+    extras = {}
+    for name in {v["albumFile"] for v in access.get("markedClips", {}).values() if "albumFile" in v}:
+        if not re.fullmatch(r"moment-[0-9]+[.]mp4", name):
+            raise ValueError("Invalid album filename")
+        file = clip.parent / "album" / name
+        with file.open("rb") as source:
+            extras[name] = stream_hash(source)
+            key = "albums/" + tid + "/" + name
+            if not bucket.exists(key):
+                source.seek(0)
+                bucket.put(key, source, file.stat().st_size)
+    payload = json.dumps({"extras": extras, "schema":1,"trip":spec,"accounts":accounts,"sha256":digest}).encode()
     bucket.put("items/" + tid, payload, len(payload))
 
 
@@ -118,6 +129,8 @@ def revoke(bucket, tid):
     bucket.put("revoked/" + tid, b"1", 1)
     bucket.delete("items/" + tid)
     bucket.delete("clips/" + tid)
+    for name in list(bucket.names("albums/" + tid + "/")):
+        bucket.delete(name)
 
 
 def restore(bucket, destination, only=None):
@@ -143,6 +156,16 @@ def restore(bucket, destination, only=None):
             with (folder/"saved.mp4").open("rb") as clip:
                 if stream_hash(clip) != record["sha256"]:
                     raise ValueError("Clip checksum mismatch")
+            for filename, expected in record.get("extras", {}).items():
+                if not re.fullmatch(r"moment-[0-9]+[.]mp4", filename):
+                    raise ValueError("Invalid album filename")
+                album = folder / "album"
+                album.mkdir(exist_ok=True)
+                with bucket.request("GET", bucket.object("albums/" + tid + "/" + filename) + "?alt=media") as res, (album/filename).open("wb") as out:
+                    shutil.copyfileobj(res,out)
+                with (album/filename).open("rb") as source:
+                    if stream_hash(source) != expected:
+                        raise ValueError("Album checksum mismatch")
             if bucket.exists("revoked/" + tid):
                 shutil.rmtree(folder)
                 continue

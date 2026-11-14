@@ -45,7 +45,7 @@ class PrivateTrips {
     record Receipt(Role role, UUID occupant, UUID actor, boolean extraction, boolean geminiTranscript, boolean useTripContext, String at, boolean shareMarkedClips) {}
     record Trip(String tripId, UUID owner, String phase, List<Seat> occupants, List<Receipt> receipts) {}
     record Selection(UUID jobId, String moment) {}
-    record Item(String tripId, String title, long durationMs, String savedAt) {}
+    record Item(String tripId, String title, long durationMs, String savedAt, UUID markId, String clipUrl) {}
 
     private final JsonMapper json=JsonMapper.builder().build();
     @Value("${media.vault-bucket:}") private String vaultBucket="";
@@ -401,11 +401,11 @@ class PrivateTrips {
             String state="MARKED", title=null, url=null;
             if(access(doc).has("draftVersion")) {
                 boolean available=clip.has("id") && (!"SAVED".equals(phase(doc)) ||
-                        clip.path("id").asText().equals(access(doc).path("selection").path("moment").asText()));
+                        clip.has("albumFile") || clip.path("id").asText().equals(access(doc).path("selection").path("moment").asText()));
                 state=available?"CLIP_READY":"NO_CLIP";
                 if(available && !canPlay) state="SHARING_DISABLED";
                 if(available && canPlay) {
-                    title="SAVED".equals(phase(doc))?access(doc).path("item").path("title").asText():clip.path("title").asText();
+                    title="SAVED".equals(phase(doc)) && !clip.has("albumFile")?access(doc).path("item").path("title").asText():clip.path("title").asText();
                     url="/api/private-trips/"+id+"/marks/"+mark.id()+"/clip";
                 }
             }
@@ -453,12 +453,23 @@ class PrivateTrips {
         }
         return true;
     }
+    record Pick(UUID markId) {}
+    synchronized Pick pick(String id,UUID actor,UUID markId)throws IOException {
+        ObjectNode doc=participantTrip(id,actor);
+        if(!canPlayMarked(doc,actor)) throw new ResponseStatusException(FORBIDDEN);
+        if(!"READY".equals(phase(doc)) || !access(doc).path("markedClips").has(markId.toString()))
+            throw new ResponseStatusException(CONFLICT);
+        access(doc).withObjectProperty("picks").withObjectProperty(actor.toString()).put(markId.toString(),true);
+        store(doc);
+        return new Pick(markId);
+    }
     synchronized Path markedClip(String id,UUID actor,UUID markId) throws IOException {
         ObjectNode doc=participantTrip(id,actor);
         if(!canPlayMarked(doc,actor)) throw new ResponseStatusException(FORBIDDEN);
         JsonNode clip=access(doc).path("markedClips").path(markId.toString());
         if(!clip.has("id") || !Set.of("READY","SAVED").contains(phase(doc))) throw new ResponseStatusException(NOT_FOUND);
         if("SAVED".equals(phase(doc))) {
+            if(clip.has("albumFile")) return dir(id).resolve("album").resolve(clip.get("albumFile").asText());
             if(!clip.get("id").asText().equals(access(doc).path("selection").path("moment").asText())) throw new ResponseStatusException(NOT_FOUND);
             return dir(id).resolve("saved.mp4");
         }
@@ -561,7 +572,8 @@ class PrivateTrips {
             for(JsonNode card:result.path("cards")) {
                 if(!Files.isRegularFile(export.resolve("master-"+card.path("file").asText()))) throw new IOException("Protected clip missing");
                 for(JsonNode markId:card.path("markIds"))
-                    markedClips.putObject(markId.asText()).put("id",card.get("id").asText()).put("title",card.get("title").asText());
+                    markedClips.putObject(markId.asText()).put("id",card.get("id").asText()).put("title",card.get("title").asText())
+                            .put("durationMs",card.path("endMs").asLong()-card.path("startMs").asLong());
             }
             access(doc).put("draftVersion",export.getFileName().toString());
             var places=access(doc).putObject("markPlaces");
@@ -631,9 +643,26 @@ class PrivateTrips {
             long at=doc.path("marks").path(key).path("atMs").asLong(-1);
             if(at<card.path("startMs").asLong() || at>=card.path("endMs").asLong()) marked.remove(key);
         }
+        // Each authored mark is a participant selection. Explicit picks can also reference shared marks.
+        if(marked!=null) {
+            Path album=Files.createDirectories(dir(id).resolve("album"));
+            Path draft=dir(id).resolve("work").resolve(a.get("draftVersion").asText());
+            for(String key:marked.propertyNames()) {
+                ObjectNode clip=(ObjectNode)marked.get(key);
+                String moment=clip.get("id").asText();
+                if(!moment.matches("moment-[0-9]+")) throw new IOException("Invalid draft clip");
+                if(selection.moment().equals(moment)) {
+                    clip.put("title",card.get("title").asText()).put("durationMs",card.path("endMs").asLong()-card.path("startMs").asLong());
+                } else {
+                    Path dest=album.resolve(moment+".mp4");
+                    if(!Files.exists(dest)) Files.createLink(dest,draft.resolve(moment+".mp4"));
+                    clip.put("albumFile",dest.getFileName().toString());
+                }
+            }
+        }
         // Hard link on the same volume commits the immutable completed MP4 without copying bytes.
         Path saved=dir(id).resolve("saved.mp4");Files.deleteIfExists(saved);Files.createLink(saved,source);
-        a.set("item",json.valueToTree(new Item(id,card.get("title").asText(),card.get("endMs").asLong()-card.get("startMs").asLong(),Instant.now().toString())));
+        a.set("item",json.valueToTree(new Item(id,card.get("title").asText(),card.get("endMs").asLong()-card.get("startMs").asLong(),Instant.now().toString(),null,"/api/library/"+id+"/clip")));
         a.set("selection",json.valueToTree(selection));a.put("phase","SAVING");
         doc.put("audioProcessingConsent",false).put("geminiTranscriptConsent",false);
         store(doc);cleanup(doc);return view(doc);
@@ -659,6 +688,8 @@ class PrivateTrips {
         deleteTree(folder.resolve("raw"));deleteTree(folder.resolve("work"));deleteTree(folder.resolve("jobs"));
         doc.remove("driveContext");
         if("DISCARDING".equals(phase)) {
+            deleteTree(folder.resolve("album"));
+            access(doc).remove("names");access(doc).remove("invites");access(doc).remove("picks");
             Files.deleteIfExists(folder.resolve("saved.mp4"));access(doc).remove("item");
             doc.remove("marks");access(doc).remove("markedClips");access(doc).remove("markPlaces");
         }
@@ -677,8 +708,23 @@ class PrivateTrips {
             for(Path p:entries.toList()) {
                 if(!Files.isRegularFile(p.resolve("trip.json"))) continue;
                 ObjectNode doc=read(p.getFileName().toString());
-                if("SAVED".equals(phase(doc)) && actor.toString().equals(access(doc).path("owner").asText()))
-                    items.add(json.treeToValue(access(doc).get("item"),Item.class));
+                if(!"SAVED".equals(phase(doc))) continue;
+                ObjectNode a=access(doc);
+                boolean owner=actor.toString().equals(a.path("owner").asText());
+                Item main=json.treeToValue(a.get("item"),Item.class);
+                if(owner) items.add(main);
+                if(!canPlayMarked(doc,actor)) continue;
+                Set<String> listed=new HashSet<>();
+                if(owner) listed.add(a.path("selection").path("moment").asText());
+                for(JsonNode mark:doc.path("marks")) {
+                    String key=mark.path("id").asText();
+                    if(!actor.toString().equals(mark.path("author").asText()) && !a.path("picks").path(actor.toString()).has(key)) continue;
+                    JsonNode clip=a.path("markedClips").path(key);
+                    String moment=clip.path("id").asText();
+                    if(!clip.has("albumFile") && !moment.equals(a.path("selection").path("moment").asText())) continue;
+                    if(listed.add(moment)) items.add(new Item(main.tripId(),clip.path("title").asText(),clip.path("durationMs").asLong(main.durationMs()),
+                        main.savedAt(),UUID.fromString(key),"/api/private-trips/"+main.tripId()+"/marks/"+key+"/clip"));
+                }
             }
         }
         items.sort(Comparator.comparing(Item::savedAt).reversed());return items;

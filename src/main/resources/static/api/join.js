@@ -29,6 +29,8 @@ async function refresh(){
       b.onclick=()=>action(async()=>{stop();const r=await api('/marks/'+e.mark.id+'/clip');const blob=await r.blob();
         const latest=await (await api('/timeline')).json();if(!latest.entries.some(x=>x.clipUrl===e.clipUrl))return;
         playing=e.clipUrl;objectUrl=URL.createObjectURL(blob);el('player').src=objectUrl;el('player').hidden=false;await el('player').play();});}
+    if(e.clipUrl && timeline.phase==='READY'){const b=document.createElement('button');b.textContent='내 보관함에 선택';row.append(b);
+      b.onclick=()=>action(async()=>{await api('/picks/'+e.mark.id,'PUT');say('보관할 장면으로 선택했어요.');});}
     return row;}));
 }
 async function action(f){try{await f();}catch(e){stop();say(e.message);}}

@@ -150,6 +150,12 @@ class PrivateTripController {
     @ApiResponse(responseCode="200",description="폐기 상태",useReturnTypeSchema=true)
     @Operation(operationId="discardTrip",summary="저장 없이 운행 폐기 또는 보관 영상 삭제",security=@SecurityRequirement(name="personToken"))
     PrivateTrips.Trip discard(@PathVariable String id,HttpServletRequest req)throws IOException {return store.discard(id,store.person(req));}
+    @PutMapping("/private-trips/{id}/picks/{markId}")
+    @Operation(operationId="pickSharedMoment",summary="재생 가능한 공동 표시 클립을 내 보관 대상으로 선택",description="본인이 표시한 클립은 기본 선택. 초안 READY에서 추가 선택하고 소유자가 finalize하면 보관된다.",security=@SecurityRequirement(name="personToken"))
+    @ApiResponse(responseCode="200",description="저장 대상 표시. 같은 선택은 멱등",useReturnTypeSchema=true)
+    PrivateTrips.Pick pick(@PathVariable String id,@PathVariable UUID markId,HttpServletRequest req)throws IOException {
+        return store.pick(id,store.person(req),markId);
+    }
     @GetMapping("/library")
     @ApiResponse(responseCode="200",description="본인의 저장 영상 배열",useReturnTypeSchema=true)
     @Operation(operationId="listLibrary",summary="본인의 보관함을 최근 저장순으로 조회",security=@SecurityRequirement(name="personToken"))
