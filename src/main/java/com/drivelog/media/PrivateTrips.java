@@ -33,7 +33,20 @@ class PrivateTrips {
     record DriveMark(UUID id, UUID author, MarkKind kind, long atMs) {}
     record TimelineEntry(DriveMark mark, String authorName, String place, String state, String title, String clipUrl) {}
     record Timeline(String tripId, Instant startedAt, String phase, List<TimelineEntry> entries) {}
-    record Source(String gear, boolean stationary, String audioSource, long frontOffsetMs, long rearOffsetMs, boolean roadReviewed) {}
+    record ShareMask(int x, int y, int width, int height) {
+        boolean valid() {
+            return x >= 0 && y >= 0 && width > 0 && height > 0
+                    && (long)x + width <= 1080 && (long)y + height <= 1920;
+        }
+    }
+    record Source(String gear, boolean stationary, String audioSource, long frontOffsetMs, long rearOffsetMs, boolean roadReviewed,
+                  @io.swagger.v3.oas.annotations.media.Schema(description="원본에 찍힌 GPS·속도 영역. 합성 화면 1080×1920 기준 픽셀, 최대 8개. 전방은 위쪽, 후방은 아래쪽.")
+                  List<ShareMask> shareMasks) {
+        Source { shareMasks = shareMasks == null ? List.of() : List.copyOf(shareMasks); }
+        Source(String gear, boolean stationary, String audioSource, long frontOffsetMs, long rearOffsetMs, boolean roadReviewed) {
+            this(gear, stationary, audioSource, frontOffsetMs, rearOffsetMs, roadReviewed, List.of());
+        }
+    }
     enum Role { PASSENGER, GUARDIAN }
     record Decision(Boolean extraction, Boolean geminiTranscript, Boolean useTripContext, Boolean shareMarkedClips) {
         Decision(Boolean extraction,Boolean geminiTranscript,Boolean useTripContext){this(extraction,geminiTranscript,useTripContext,null);}
@@ -232,6 +245,7 @@ class PrivateTrips {
         Source source=reg.source();
         if(startedAt==null && (source==null || !"P".equals(source.gear()) || !source.stationary() || !source.roadReviewed()
                 || !List.of("front","rear").contains(Objects.toString(source.audioSource(),""))
+                || source.shareMasks().size()>8 || source.shareMasks().stream().anyMatch(mask -> !mask.valid())
                 || source.frontOffsetMs()<0 || source.rearOffsetMs()<0)) throw new ResponseStatusException(BAD_REQUEST);
         Path folder=dir(id);
         if(Files.isRegularFile(folder.resolve("trip.json"))) {
@@ -274,6 +288,10 @@ class PrivateTrips {
         doc.putObject("roadReview").put("complete",true);
         ((ObjectNode)doc.get("extraction")).put("gear","P").put("stationary",true);
         access(doc).set("source",json.valueToTree(source));
+        if (!source.shareMasks().isEmpty()) {
+            doc.set("shareMasks",json.valueToTree(source.shareMasks()));
+            access(doc).put("shareMasksUsed",true);
+        }
     }
     private void finishImport(ObjectNode doc) throws IOException {
         String id=doc.get("tripId").asText();Path raw=dir(id).resolve("raw");
@@ -662,6 +680,11 @@ class PrivateTrips {
         }
         // Hard link on the same volume commits the immutable completed MP4 without copying bytes.
         Path saved=dir(id).resolve("saved.mp4");Files.deleteIfExists(saved);Files.createLink(saved,source);
+        Path shareSource=source.resolveSibling("share-"+source.getFileName());
+        Path shareSaved=dir(id).resolve("share.mp4");
+        Files.deleteIfExists(shareSaved);
+        if (Files.isRegularFile(shareSource)) Files.createLink(shareSaved,shareSource);
+        else if (!card.hasNonNull("driveContext") && !card.hasNonNull("shareMasks")) Files.createLink(shareSaved,source);
         a.set("item",json.valueToTree(new Item(id,card.get("title").asText(),card.get("endMs").asLong()-card.get("startMs").asLong(),Instant.now().toString(),null,"/api/library/"+id+"/clip")));
         a.set("selection",json.valueToTree(selection));a.put("phase","SAVING");
         doc.put("audioProcessingConsent",false).put("geminiTranscriptConsent",false);
@@ -690,6 +713,7 @@ class PrivateTrips {
         if("DISCARDING".equals(phase)) {
             deleteTree(folder.resolve("album"));
             access(doc).remove("names");access(doc).remove("invites");access(doc).remove("picks");
+            Files.deleteIfExists(folder.resolve("share.mp4"));
             Files.deleteIfExists(folder.resolve("saved.mp4"));access(doc).remove("item");
             doc.remove("marks");access(doc).remove("markedClips");access(doc).remove("markPlaces");
         }
@@ -729,6 +753,17 @@ class PrivateTrips {
         }
         items.sort(Comparator.comparing(Item::savedAt).reversed());return items;
     }
+    synchronized Path savedShare(String id, UUID actor) throws IOException {
+        Path privateFile = saved(id, actor);
+        Path shared = privateFile.resolveSibling("share.mp4");
+        if (Files.isRegularFile(shared)) return shared;
+        ObjectNode a = access(read(id));
+        if (a.path("usedContext").asBoolean() || a.path("shareMasksUsed").asBoolean()) {
+            throw new ResponseStatusException(CONFLICT, "Share copy unavailable for this older clip");
+        }
+        return privateFile;
+    }
+
     synchronized Path saved(String id,UUID actor) throws IOException {
         owner(id,actor);if(!"SAVED".equals(phase(read(id)))) throw new ResponseStatusException(NOT_FOUND);
         return dir(id).resolve("saved.mp4");

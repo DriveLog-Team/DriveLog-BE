@@ -31,7 +31,7 @@ POST /api/media/jobs/{id}/edits
 {"jobId":"편집 작업 UUID","moment":"moment-001"}
 GET /api/library
 GET /api/library/{id}/clip
-POST /api/library/{tripId}/handoffs</pre><p>저장 성공 후 보관함을 갱신합니다. QR의 qrImage를 표시하면 휴대폰에서 확인 후 MP4를 내려받습니다. 5분 만료 또는 1회 사용 후 다시 발급합니다. 토큰과 QR 이미지는 로그에 남기지 않습니다.</p></details></section>
+POST /api/library/{tripId}/handoffs</pre><p>저장 성공 후 보관함을 갱신합니다. 개인 재생본은 동의된 장소를 표시할 수 있습니다. QR 다운로드와 Android 스토리에는 출발지·도착지·이벤트 장소 레이어를 뺀 공유본을 전달합니다. 빌트인 캠이 속도나 좌표를 영상에 새긴 경우, 정차 등록 때 source.shareMasks에 표시 영역을 지정하세요. 전방이 위쪽, 후방이 아래쪽인 1080×1920 합성 프레임에서 픽셀 단위로 지정합니다. 예: <code>[{"x":0,"y":860,"width":1080,"height":100}]</code>. 지정 영역은 공유본에서 검게 가립니다. 기기별 표시 영역과 이동 여부를 미리 확인하세요. 이전 위치 포함 클립에 공유본이 없으면 QR 발급은 409입니다. QR의 qrImage를 표시하면 휴대폰에서 확인 후 MP4를 내려받습니다. 5분 만료 또는 1회 사용 후 다시 발급합니다. 토큰과 QR 이미지는 로그에 남기지 않습니다.</p></details></section>
 <section id="album"><h2>동승자 초대와 여행 앨범</h2>
 <p>DRIVING에서 운전자가 링크를 한 사람에게 전달합니다. 동승자는 휴대폰에서 링크를 열어 이름을 입력합니다. 탑승자별로 별도 링크를 발급합니다. 링크 수락과 추출·분석 동의는 별개입니다.</p>
 <details><summary>초대·재시도</summary><pre>POST /api/private-trips/{id}/invites

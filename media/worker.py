@@ -217,7 +217,7 @@ def render(card, tracks, audio_name, wd, dest, blur_intervals=(), masks=(), capt
         video = "[road]"
     filters.append(video+("ass=captions.ass" if captions else "null")+"[video]")
     ff("-loglevel","error",*args,"-filter_complex_threads","1","-filter_complex",";".join(filters),
-       "-map","[video]","-map","2:a:0","-t",duration,"-map_metadata","-1","-c:v","libx264",
+       "-map","[video]","-map","2:a:0","-t",duration,"-map_metadata","-1","-map_chapters","-1","-c:v","libx264",
        "-preset","veryfast","-threads","2","-pix_fmt","yuv420p","-c:a","aac","-movflags","+faststart",dest,cwd=wd)
     ff("-v","error","-xerror",*input_args(dest),"-map","0:v:0","-map","0:a:0","-f","null","-")
 
@@ -263,12 +263,30 @@ def apply_edit(cards, edit, limit, marks=None):
             card.pop("recommendation")
 
 
-def caption_master(master, offset, card, wd, output):
+def caption_master(master, offset, card, wd, output, share_masks=()):
+    filters = []
+    for mask in share_masks:
+        x,y,w,h = (mask[key] for key in ("x","y","width","height"))
+        if (any(type(value) is not int for value in (x,y,w,h)) or x < 0 or y < 0
+                or w <= 0 or h <= 0 or x+w > 1080 or y+h > 1920):
+            raise ValueError("Invalid share mask")
+        filters.append(f"drawbox=x={x}:y={y}:w={w}:h={h}:color=black:t=fill")
+    filters.append("ass=captions.ass")
     subtitles(card, wd / "captions.ass")
     ff("-v","error","-ss",(card["startMs"]-offset)/1000,*input_args(master),
-       "-t",(card["endMs"]-card["startMs"])/1000,"-vf","ass=captions.ass",
-       "-map","0:v:0","-map","0:a:0","-map_metadata","-1","-c:v","libx264","-preset","veryfast",
+       "-t",(card["endMs"]-card["startMs"])/1000,"-vf",",".join(filters),
+       "-map","0:v:0","-map","0:a:0","-map_metadata","-1","-map_chapters","-1","-c:v","libx264","-preset","veryfast",
        "-threads","2","-c:a","aac","-movflags","+faststart",output,cwd=wd)
+
+
+def publish_clip(master, offset, card, wd, directory):
+    private = directory / card["file"]
+    shared = directory / ("share-" + card["file"])
+    caption_master(master, offset, card, wd, private)
+    if card.get("driveContext") or card.get("shareMasks"):
+        caption_master(master, offset, {k:v for k,v in card.items() if k != "driveContext"}, wd, shared, card.get("shareMasks", ()))
+    else:
+        os.link(private, shared)
 
 
 def from_draft(manifest, library, spec, profile, edit_file):
@@ -295,7 +313,7 @@ def from_draft(manifest, library, spec, profile, edit_file):
                 anchor=card.get("recommendation",{}).get("quoteStartMs",card["startMs"])
                 start=min(max(card["startMs"],anchor),card["endMs"]-limit)
                 apply_edit([card],dict(id=card["id"],startMs=start,endMs=start+limit),limit,spec.get("marks"))
-    version=hashlib.sha256(json.dumps(["marks-v2",initial["version"],profile,edit],sort_keys=True).encode()).hexdigest()[:32]
+    version=hashlib.sha256(json.dumps(["share-no-route-v1",initial["version"],profile,edit],sort_keys=True).encode()).hexdigest()[:32]
     target=library/version
     if (target/"cards.json").is_file():
         return target
@@ -305,7 +323,7 @@ def from_draft(manifest, library, spec, profile, edit_file):
         stage=wd/"release";stage.mkdir()
         for card in parent["cards"]:
             require_audio_consent(manifest)
-            caption_master(canonical/("master-"+card["file"]),offsets[card["id"]],card,wd,stage/card["file"])
+            publish_clip(canonical/("master-"+card["file"]),offsets[card["id"]],card,wd,stage)
         parent.update(version=version,profile=profile)
         write_json(stage/"cards.json",parent)
         require_audio_consent(manifest)
@@ -353,7 +371,7 @@ def run(manifest, library, profile, edit_file=None):
     media_spec = {k: v for k, v in spec.items() if k not in ("gleoExcerptConsent", "geminiTranscriptConsent", "recommendationMode")}
     source_revision = hashlib.sha256(json.dumps([key,media_spec,hashes],
                                                 sort_keys=True).encode()).hexdigest()
-    fingerprint = [source_revision,profile,edit,"render-audio-events-v1",gemini_demo.REVISION if mode == "gleo-demo" else REVISION]
+    fingerprint = [source_revision,profile,edit,"render-share-no-route-v1",gemini_demo.REVISION if mode == "gleo-demo" else REVISION]
     version = hashlib.sha256(json.dumps(fingerprint,sort_keys=True).encode()).hexdigest()[:32]
     target = library/version
     if (target/"cards.json").is_file():
@@ -430,10 +448,17 @@ def run(manifest, library, profile, edit_file=None):
                 raise ValueError("Edit overlaps excluded road footage")
             card["file"] = card["id"]+".mp4"
             personal = "access" in spec
-            dest = staging / (("master-" if personal else "") + card["file"])
-            render(card,tracks,audio_name,wd,dest,road_review.get("blur", []),masks,captions=not personal)
-            if personal:
-                caption_master(dest,card["startMs"],card,wd,staging/card["file"])
+            if spec.get("shareMasks"):
+                card["shareMasks"] = spec["shareMasks"]
+            needs_master = personal or bool(card.get("driveContext") or card.get("shareMasks"))
+            dest = staging / (("master-" if needs_master else "") + card["file"])
+            render(card,tracks,audio_name,wd,dest,road_review.get("blur", []),masks,captions=not needs_master)
+            if needs_master:
+                publish_clip(dest,card["startMs"],card,wd,staging)
+                if not personal:
+                    dest.unlink()
+            else:
+                os.link(dest, staging / ("share-" + card["file"]))
         write_json(staging/"cards.json",dict(tripId=spec["tripId"],profile=profile,version=version,sourceRevision=source_revision,
                    status="READY" if selected else ("NO_MEMORY_CANDIDATE" if cues else "NO_SPEECH_CANDIDATE"),
                    cards=selected,privacy=privacy))

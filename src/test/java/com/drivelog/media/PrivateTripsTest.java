@@ -225,6 +225,14 @@ class PrivateTripsTest {
         var restarted=new PrivateTrips(library);restarted.recover();
         assertThat(input.resolveSibling("work")).doesNotExist();
         assertThat(Files.readString(restarted.saved(id,owner))).isEqualTo("edited content");
+        assertThat(Files.readString(restarted.savedShare(id,owner))).isEqualTo("edited content");
+        Files.delete(input.resolveSibling("share.mp4"));
+        var legacy = tools.jackson.databind.json.JsonMapper.builder().build();
+        var doc = (tools.jackson.databind.node.ObjectNode)legacy.readTree(input.toFile());
+        doc.withObjectProperty("access").put("usedContext",true);
+        legacy.writeValue(input.toFile(),doc);
+        assertThatExceptionOfType(ResponseStatusException.class).isThrownBy(() -> restarted.savedShare(id,owner))
+                .extracting(e -> e.getStatusCode().value()).isEqualTo(409);
         restarted.decide(id,child,PrivateTrips.Role.GUARDIAN,guardian,new PrivateTrips.Decision(false,false));
         assertThat(restarted.items(owner)).isEmpty();
         assertThat(input.resolveSibling("saved.mp4")).doesNotExist();

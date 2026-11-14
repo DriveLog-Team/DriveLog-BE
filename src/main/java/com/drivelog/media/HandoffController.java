@@ -65,7 +65,7 @@ public class HandoffController {
     }
 
     @PostMapping("/api/media/jobs/{jobId}/clips/{moment}/handoffs")
-    @Operation(operationId="issueHandoff", summary="카드 1개의 일회용 다운로드 QR 발급",
+    @Operation(operationId="issueHandoff", summary="주행 위치 표시를 제외한 클립의 일회용 QR 발급",
             security={@SecurityRequirement(name="operatorToken"),@SecurityRequirement(name="personToken")})
     @ApiResponse(responseCode="201", description="QR과 회수 ID", content=@Content(schema=@Schema(implementation=Ticket.class)))
     @ApiResponse(responseCode="401", description="운영자 인증 필요", content=@Content)
@@ -76,16 +76,17 @@ public class HandoffController {
     public synchronized ResponseEntity<Ticket> issue(@PathVariable UUID jobId, @PathVariable String moment,
             HttpServletRequest req) throws IOException, WriterException {
         var job = media.owned(jobId, req);
-        media.clip(job, moment);
+        media.shareClip(job, moment);
         UUID owner=PrivateTrips.managed(job.tripId()) ? media.privateTrips.person(req) : null;
         return grant(job,null,owner,moment);
     }
 
     @PostMapping("/api/library/{tripId}/handoffs")
-    @Operation(summary="개인 보관 영상의 일회용 QR 발급",security=@SecurityRequirement(name="personToken"))
+    @Operation(summary="개인 보관 영상의 위치 표시 없는 공유본 QR 발급",security=@SecurityRequirement(name="personToken"))
     @ApiResponse(responseCode="201",description="5분간 유효한 QR",content=@Content(schema=@Schema(implementation=Ticket.class)))
+    @ApiResponse(responseCode="409",description="이전 위치 포함 보관본에 공유용 영상이 없음",content=@Content)
     public synchronized ResponseEntity<Ticket> savedQr(@PathVariable String tripId,HttpServletRequest req) throws IOException, WriterException {
-        UUID owner=media.privateTrips.person(req);media.privateTrips.saved(tripId,owner);
+        UUID owner=media.privateTrips.person(req);media.privateTrips.savedShare(tripId,owner);
         return grant(null,tripId,owner,"saved");
     }
 
@@ -148,7 +149,7 @@ public class HandoffController {
     @PostMapping(value="/api/handoffs/redeem",consumes=MediaType.APPLICATION_FORM_URLENCODED_VALUE,produces="video/mp4")
     @Operation(operationId="redeemHandoff", summary="QR을 한 번 사용하여 MP4 내려받기",
             description="다운로드 폼 또는 DriveLog Android 앱이 폼 본문에 id와 code를 전송한다. 동시에 요청해도 한 번만 허용한다.")
-    @ApiResponse(responseCode="200",description="MP4 첨부파일",content=@Content(mediaType="video/mp4",schema=@Schema(type="string",format="binary")))
+    @ApiResponse(responseCode="200",description="주행 맥락 오버레이를 제외한 MP4 첨부파일",content=@Content(mediaType="video/mp4",schema=@Schema(type="string",format="binary")))
     @ApiResponse(responseCode="400",description="폼 값 누락 또는 UUID 오류",content=@Content)
     @ApiResponse(responseCode="410",description="코드 불일치·만료·회수·사용 완료",content=@Content)
     @ApiResponse(responseCode="403",description="동의 철회",content=@Content)
@@ -167,7 +168,7 @@ public class HandoffController {
         String expected = Base64.getUrlEncoder().withoutPadding().encodeToString(grant.secret());
         if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.US_ASCII), code.getBytes(StandardCharsets.US_ASCII)))
             throw new ResponseStatusException(HttpStatus.GONE);
-        Path clip = grant.savedTrip()==null ? media.clip(grant.job(), grant.moment()) : media.privateTrips.saved(grant.savedTrip(),grant.owner());
+        Path clip = grant.savedTrip()==null ? media.shareClip(grant.job(), grant.moment()) : media.privateTrips.savedShare(grant.savedTrip(),grant.owner());
         grants.remove(id);
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).contentType(MediaType.valueOf("video/mp4"))
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"DriveLog-" + grant.moment() + ".mp4\"")
