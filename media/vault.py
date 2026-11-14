@@ -81,7 +81,7 @@ def backup(bucket, root, doc):
     if bucket.exists("revoked/" + tid):
         raise ValueError("Revoked item")
     # Only the selected clip, its permissions and the fields used to view/discard it survive.
-    access = {key: a[key] for key in ("owner","seats","receipts","item","selection","usedContext","names","picks")
+    access = {key: a[key] for key in ("owner","seats","receipts","item","selection","usedContext","shareMasksUsed","names","picks")
               if key in a}
     access.update(phase="SAVED", vaultSynced=True)
     spec = {"tripId": tid, "access": access, "extraction": {"occupantCount": len(a["seats"])},
@@ -101,6 +101,14 @@ def backup(bucket, root, doc):
         if not bucket.exists(key):
             source.seek(0)
             bucket.put(key, source, clip.stat().st_size)
+    share = clip.with_name("share.mp4")
+    share_hash = None
+    if share.is_file():
+        with share.open("rb") as source:
+            share_hash = stream_hash(source)
+            if share_hash != digest and not bucket.exists("shares/" + tid):
+                source.seek(0)
+                bucket.put("shares/" + tid, source, share.stat().st_size)
     extras = {}
     for name in {v["albumFile"] for v in access.get("markedClips", {}).values() if "albumFile" in v}:
         if not re.fullmatch(r"moment-[0-9]+[.]mp4", name):
@@ -112,7 +120,7 @@ def backup(bucket, root, doc):
             if not bucket.exists(key):
                 source.seek(0)
                 bucket.put(key, source, file.stat().st_size)
-    payload = json.dumps({"extras": extras, "schema":1,"trip":spec,"accounts":accounts,"sha256":digest}).encode()
+    payload = json.dumps({"shareSha256": share_hash, "extras": extras, "schema":1,"trip":spec,"accounts":accounts,"sha256":digest}).encode()
     bucket.put("items/" + tid, payload, len(payload))
 
 
@@ -129,6 +137,7 @@ def revoke(bucket, tid):
     bucket.put("revoked/" + tid, b"1", 1)
     bucket.delete("items/" + tid)
     bucket.delete("clips/" + tid)
+    bucket.delete("shares/" + tid)
     for name in list(bucket.names("albums/" + tid + "/")):
         bucket.delete(name)
 
@@ -156,6 +165,17 @@ def restore(bucket, destination, only=None):
             with (folder/"saved.mp4").open("rb") as clip:
                 if stream_hash(clip) != record["sha256"]:
                     raise ValueError("Clip checksum mismatch")
+            share_hash = record.get("shareSha256")
+            if share_hash:
+                shared = folder / "share.mp4"
+                if share_hash == record["sha256"]:
+                    os.link(folder / "saved.mp4", shared)
+                else:
+                    with bucket.request("GET", bucket.object("shares/" + tid) + "?alt=media") as res, shared.open("wb") as out:
+                        shutil.copyfileobj(res, out)
+                    with shared.open("rb") as stream:
+                        if stream_hash(stream) != share_hash:
+                            raise ValueError("Share clip checksum mismatch")
             for filename, expected in record.get("extras", {}).items():
                 if not re.fullmatch(r"moment-[0-9]+[.]mp4", filename):
                     raise ValueError("Invalid album filename")
