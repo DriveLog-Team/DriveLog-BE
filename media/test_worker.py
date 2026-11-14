@@ -10,6 +10,13 @@ def cue(group, start, end, text):
 
 
 class ConversationTest(unittest.TestCase):
+    def test_trim_keeps_only_marks_in_half_open_interval(self):
+        cards=make_cards([cue(0,0,10000,"대화")],15000)
+        cards[0]["markIds"]=["early","start","end"]
+        marks={key:{"atMs":at} for key,at in zip(cards[0]["markIds"],[1000,5000,9000])}
+        apply_edit(cards,dict(id=cards[0]["id"],startMs=5000,endMs=9000),15000,marks)
+        self.assertEqual(cards[0]["markIds"],["start"])
+
     def test_source_hash_in_runtime_image(self):
         with TemporaryDirectory() as root:
             source = Path(root, "input")

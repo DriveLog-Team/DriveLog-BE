@@ -624,6 +624,13 @@ class PrivateTrips {
         for(JsonNode c:json.readTree(job.export().resolve("cards.json").toFile()).get("cards"))
             if(c.path("id").asText().equals(selection.moment())) card=(ObjectNode)c;
         if(card==null) throw new ResponseStatusException(NOT_FOUND);
+        // Recheck old worker outputs against the actual saved interval as well.
+        var marked=(ObjectNode)a.get("markedClips");
+        if(marked!=null) for(String key:List.copyOf(marked.propertyNames())) {
+            if(!selection.moment().equals(marked.path(key).path("id").asText())) continue;
+            long at=doc.path("marks").path(key).path("atMs").asLong(-1);
+            if(at<card.path("startMs").asLong() || at>=card.path("endMs").asLong()) marked.remove(key);
+        }
         // Hard link on the same volume commits the immutable completed MP4 without copying bytes.
         Path saved=dir(id).resolve("saved.mp4");Files.deleteIfExists(saved);Files.createLink(saved,source);
         a.set("item",json.valueToTree(new Item(id,card.get("title").asText(),card.get("endMs").asLong()-card.get("startMs").asLong(),Instant.now().toString())));
