@@ -316,6 +316,17 @@ public class MediaJobController {
         return file;
     }
 
+    Path shareClip(Job job, String moment) throws IOException {
+        Path privateFile = clip(job, moment);
+        Path shared = privateFile.resolveSibling("share-" + privateFile.getFileName());
+        if (Files.isRegularFile(shared)) return shared;
+        // Older exports without driving context used the same metadata-stripping renderer.
+        for (JsonNode card : json.readTree(job.export().resolve("cards.json").toFile()).path("cards")) {
+            if (moment.equals(card.path("id").asText()) && !card.hasNonNull("driveContext") && !card.hasNonNull("shareMasks")) return privateFile;
+        }
+        throw new ResponseStatusException(HttpStatus.CONFLICT, "Share copy unavailable for this older clip");
+    }
+
     /** Contract for the vehicle app to forward after a Gleo Action in the selected trip. */
     @GetMapping("/{id}/gleo-callback")
     @Operation(operationId="getGleoCallback", summary="차량 앱이 전달할 Gleo 콜백 구성")

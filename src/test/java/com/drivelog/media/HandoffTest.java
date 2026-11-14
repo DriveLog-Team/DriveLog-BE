@@ -30,7 +30,7 @@ class HandoffTest {
         var jobId = UUID.randomUUID();
         var path = Files.writeString(dir.resolve("moment-002.mp4"), "selected clip");
         when(media.owned(jobId,req)).thenReturn(job);
-        when(media.clip(job,"moment-002")).thenReturn(path);
+        when(media.shareClip(job,"moment-002")).thenReturn(path);
         var controller = new HandoffController(media, "https://phone.example", Duration.ofMinutes(5));
         var ticket = controller.issue(jobId, "moment-002", req).getBody();
         URI qr = decode(ticket);
@@ -56,11 +56,11 @@ class HandoffTest {
         var job = mock(MediaJobController.Job.class);
         UUID id = UUID.randomUUID();
         when(media.owned(id,req)).thenReturn(job);
-        when(media.clip(job,"moment-001")).thenReturn(dir.resolve("clip.mp4"));
+        when(media.shareClip(job,"moment-001")).thenReturn(dir.resolve("clip.mp4"));
         var controller = new HandoffController(media,"https://phone.example",Duration.ofMinutes(5));
         var ticket = controller.issue(id,"moment-001",req).getBody();
         String code = decode(ticket).getFragment().split("\\.")[1];
-        when(media.clip(job,"moment-001")).thenThrow(new ResponseStatusException(HttpStatus.FORBIDDEN));
+        when(media.shareClip(job,"moment-001")).thenThrow(new ResponseStatusException(HttpStatus.FORBIDDEN));
         assertThatExceptionOfType(ResponseStatusException.class).isThrownBy(() -> controller.redeem(ticket.id(),code))
                 .extracting(e -> e.getStatusCode().value()).isEqualTo(403);
         controller.revoke(ticket.id(),req);
