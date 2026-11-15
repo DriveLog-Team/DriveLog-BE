@@ -111,9 +111,25 @@ public class MediaJobController {
             throw error(HttpStatus.BAD_REQUEST);
         if (input.edit()!=null && ((input.edit().title()!=null && (input.edit().title().isBlank() || input.edit().title().length()>80))
                 || (input.edit().captions()!=null && (input.edit().captions().size()>100 || input.edit().captions().stream().anyMatch(t -> t==null || t.length()>200))))) throw error(HttpStatus.BAD_REQUEST);
-        privateTrips.checkSpace(Files.getFileStore(library).getUsableSpace(),0);
         Path file = personal ? privateTrips.input(input.tripId(),privateTrips.person(req)) : trips.resolve(input.tripId()).resolve("trip.json");
         if (!Files.isRegularFile(file) || (!personal && !file.toRealPath().startsWith(trips))) throw error(HttpStatus.NOT_FOUND);
+        UUID id;
+        String retryKey = req.getHeader("Idempotency-Key");
+        if (retryKey == null) {
+            id = UUID.randomUUID();
+        } else {
+            try {
+                if (!UUID.fromString(retryKey).toString().equals(retryKey)) throw new IllegalArgumentException();
+            } catch (IllegalArgumentException invalid) {
+                throw error(HttpStatus.BAD_REQUEST);
+            }
+            id = UUID.nameUUIDFromBytes((retryKey + "/" + json.writeValueAsString(input)).getBytes(StandardCharsets.UTF_8));
+            if (jobs.containsKey(id)) {
+                owned(id, req);
+                return ResponseEntity.accepted().cacheControl(CacheControl.noStore()).body(Map.of("jobId", id));
+            }
+        }
+        privateTrips.checkSpace(Files.getFileStore(library).getUsableSpace(),0);
         JsonNode manifest = json.readTree(file.toFile());
         if (!input.tripId().equals(manifest.path("tripId").asText())) throw error(HttpStatus.CONFLICT);
         consent(file);
@@ -127,7 +143,6 @@ public class MediaJobController {
                     !Files.isRegularFile(parent.export().resolve(input.edit().id()+".mp4"))) throw error(HttpStatus.NOT_FOUND);
             baseVersion = parent.export().getFileName().toString();
         }
-        UUID id = UUID.randomUUID();
         Job job = new Job(id,input.tripId(),input.profile(),"QUEUED",file,null,manifest.path("roadReview"));
         String revision=baseVersion;
         if(personal) privateTrips.startEdit(job.tripId());

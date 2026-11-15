@@ -135,8 +135,9 @@ class PrivateTripController {
     @ApiResponse(responseCode="200",description="반영된 응답과 운행 상태",useReturnTypeSchema=true)
     @Operation(operationId="recordConsent",summary="지정된 본인 또는 보호자의 동의·거절·철회",description="extraction과 geminiTranscript 모두 명시한다. 하나라도 false면 처리를 취소하고 원본과 중간물, 보관된 편집본의 삭제를 시작한다.",security=@SecurityRequirement(name="personToken"))
     PrivateTrips.Trip consent(@PathVariable String id,@PathVariable UUID occupant,@PathVariable PrivateTrips.Role role,
-            @RequestBody PrivateTrips.Decision body,HttpServletRequest req)throws IOException {
-        return store.decide(id,occupant,role,store.person(req),body);
+            @RequestBody PrivateTrips.Decision body,
+            @RequestHeader(value="X-DriveLog-Receipt-Version", required=false) String receiptVersion, HttpServletRequest req)throws IOException {
+        return store.decide(id,occupant,role,store.person(req),body,receiptVersion);
     }
     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode="409",description="작업 진행 중 또는 확정 대상 충돌",content=@io.swagger.v3.oas.annotations.media.Content)
     @PostMapping("/private-trips/{id}/finalize")

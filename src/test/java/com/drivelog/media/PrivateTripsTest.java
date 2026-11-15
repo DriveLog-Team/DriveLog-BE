@@ -17,6 +17,20 @@ class PrivateTripsTest {
         "occupants":[{"ageBand":"14plus","allowed":true},{"ageBand":"under14","guardianAllowed":true}]},
         "audioProcessingConsent":true,"geminiTranscriptConsent":true,"roadReview":{"complete":true}}
         """;
+    @Test void olderConsentCannotRestoreRevokedSharing() throws Exception {
+        var store = new PrivateTrips(library);
+        var id = store.issue().accountId();
+        var seats = List.of(new PrivateTrips.Seat(id, false, null));
+        String trip = store.register(new PrivateTrips.Registration(UUID.randomUUID(), id, seats,
+                new PrivateTrips.Source("P", true, "front", 0, 0, true))).tripId();
+        var role = PrivateTrips.Role.PASSENGER;
+        var shared = new PrivateTrips.Decision(true, true, false, true);
+        String first = store.decide(trip, id, role, id, shared, "none").receipts().getFirst().at();
+        store.decide(trip, id, role, id, new PrivateTrips.Decision(true, true, false, false), first);
+        assertThatThrownBy(() -> store.decide(trip, id, role, id, shared, first))
+                .isInstanceOfSatisfying(ResponseStatusException.class, e -> assertThat(e.getStatusCode().value()).isEqualTo(409));
+        assertThat(store.status(trip, id).receipts().getFirst().shareMarkedClips()).isFalse();
+    }
     @Test void participantAlbumSurvivesFinalizeAndSharingWithdrawal() throws Exception {
         var store=new PrivateTrips(library);
         UUID owner=store.issue().accountId(),guest=store.issue().accountId(),outside=store.issue().accountId();
