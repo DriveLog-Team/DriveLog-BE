@@ -190,7 +190,7 @@ class PrivateTrips {
         var invitation=invites.putObject(HexFormat.of().formatHex(hash(code))).put("until",until.getEpochSecond());
         invitation.set("seat",json.valueToTree(seat));
         store(doc);
-        return new Invite(publicOrigin.replaceFirst("/$","")+"/api/join.html#"+id+"."+code,until);
+        return new Invite(publicOrigin.replaceFirst("/$","")+"/api/companion/index.html#"+id+"."+code,until);
     }
     synchronized Guest join(String id,JoinInput input) throws IOException {
         if(input==null || input.code()==null || !input.code().matches("[A-Za-z0-9_-]{43}") ||
@@ -516,7 +516,11 @@ class PrivateTrips {
         doc.put("audioProcessingConsent",all).put("geminiTranscriptConsent",all);return all;
     }
     private boolean agreed(JsonNode r){return r.path("extraction").asBoolean(false) && r.path("geminiTranscript").asBoolean(false);}
-    synchronized Trip decide(String id, UUID occupant, Role role, UUID actor, Decision d) throws IOException {
+    Trip decide(String id, UUID occupant, Role role, UUID actor, Decision d) throws IOException {
+        return decide(id, occupant, role, actor, d, null);
+    }
+
+    synchronized Trip decide(String id, UUID occupant, Role role, UUID actor, Decision d, String expectedReceipt) throws IOException {
         ObjectNode doc=read(id); Seat s=seats(doc).stream().filter(x->x.occupant().equals(occupant)).findFirst().orElseThrow(()->new ResponseStatusException(NOT_FOUND));
         if(!actor.equals(role==Role.PASSENGER?s.occupant():s.guardian())) throw new ResponseStatusException(FORBIDDEN);
         if(d==null || d.extraction()==null || d.geminiTranscript()==null) throw new ResponseStatusException(BAD_REQUEST);
@@ -524,6 +528,13 @@ class PrivateTrips {
         if("DISCARDED".equals(phase(doc)) && !yes) return view(doc);
         if(!Set.of("PENDING","UPLOAD","READY","SAVED").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
         var receipts=(ObjectNode)access(doc).get("receipts");String key=occupant+"/"+role;
+        String previous = receipts.path(key).path("at").asString("none");
+        if (expectedReceipt != null && !expectedReceipt.equals(previous)) throw new ResponseStatusException(CONFLICT);
+        Instant changed = Instant.now();
+        if (!previous.equals("none")) {
+            Instant last = Instant.parse(previous);
+            if (!changed.isAfter(last)) changed = last.plusNanos(1);
+        }
         boolean priorContext=receipts.path(key).path("useTripContext").asBoolean(false);
         boolean context=yes && (d.useTripContext()==null?priorContext:d.useTripContext());
         boolean priorShare=receipts.path(key).path("shareMarkedClips").asBoolean(false);
@@ -531,19 +542,19 @@ class PrivateTrips {
         if(yes && agreed(receipts.path(key))) {
             if(receipts.path(key).path("useTripContext").asBoolean()==context) {
                 if(share!=priorShare) {
-                    ((ObjectNode)receipts.get(key)).put("shareMarkedClips",share).put("at",Instant.now().toString());
+                    ((ObjectNode)receipts.get(key)).put("shareMarkedClips",share).put("at",changed.toString());
                     if ("SAVED".equals(phase(doc))) vault("save",doc);
                     store(doc);
                 }
                 return view(doc);
             }
             if(!context && access(doc).path("usedContext").asBoolean()) {
-                receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),false,Instant.now().toString(),share)));
+                receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),false,changed.toString(),share)));
                 return discardContext(doc);
             }
             if(!Set.of("PENDING","UPLOAD").contains(phase(doc))) throw new ResponseStatusException(CONFLICT);
         }
-        receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),context,Instant.now().toString(),share)));
+        receipts.set(key,json.valueToTree(new Receipt(role,occupant,actor,d.extraction(),d.geminiTranscript(),context,changed.toString(),share)));
         boolean all=refresh(doc);
         access(doc).put("phase",yes?(all?(access(doc).has("uploads") && access(doc).get("uploads").size()<2?"UPLOAD":"READY"):"PENDING"):"DISCARDING");
         store(doc);cleanup(doc);return view(doc);

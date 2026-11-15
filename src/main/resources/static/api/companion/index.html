@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>DriveLog 동승자와 함께 남기는 순간</title>
+<link rel="stylesheet" href="styles.css"><script type="module" src="app.js"></script>
+</head>
+<body>
+<header><a class="brand" href="./index.html" aria-label="DriveLog 홈">DriveLog<span>함께 달린 순간을 간직해요</span></a><button id="logout" hidden>연결 해제</button></header>
+<nav id="navigation" aria-label="내 기록" hidden><button data-page="trips">내 드라이브</button><button data-page="library">보관함</button></nav>
+<div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
+<button id="cancel" hidden>전송 취소</button>
+<main id="content" aria-busy="false"></main>
+<dialog id="player"><button id="close-player">재생 닫기</button><video controls playsinline></video></dialog>
+<dialog id="handoff"><h2>휴대폰에 영상 저장</h2><p>5분 동안 한 번 사용할 수 있어요.</p><img alt="선택 영상 다운로드 QR"><p id="handoff-time"></p><button id="revoke">QR 회수</button><button id="close-handoff">닫기</button></dialog>
+<footer>주행 중에는 운전자가 휴대폰을 조작하지 마세요.</footer>
+</body></html>
